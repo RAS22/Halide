@@ -64,7 +64,7 @@ private:
     IntrusivePtr<UnionReductionContents> _contents;
 
     EXPORT void convert_to_func();
-    EXPORT Expr as_func(const vector<Expr>& args) const;
+    EXPORT Expr call_as_func(const std::vector<Expr>& args) const;
 
 public:
     EXPORT UnionReduction();

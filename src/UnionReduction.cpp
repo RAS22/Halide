@@ -67,16 +67,21 @@ static bool expr_depends_on_var(Expr e, string v) {
 class SubstituteUnionWithFunc : public IRVisitor {
 private:
     using IRVisitor::visit;
-    UnionReduction union_op;
     void visit(const Call *op) {
         if (op->call_type == Call::UnionReduction) {
-            op
+            UnionReduction union_op = op->union_op;
+            vector<Expr> args = op->args;
+            *op = Call::make(union_op->call_as_func(op->args));
         }
     }
 public:
-    SubstituteUnionWithFunc(const UnionRedution &u) : union_op(u) {}
+    SubstituteUnionWithFunc() {}
 };
 
+static void substitute_union_with_func(const Expr& e) {
+    SubstituteUnionWithFunc s;
+    e.accept(&s);
+}
 
 // -----------------------------------------------------------------------------
 
@@ -329,23 +334,21 @@ UnionReduction& UnionReduction::split(string x, int tile) {
 
 void UnionReduction::convert_to_func() {
     // check if union has already been converted to function
-    if (!_contents.ptr->funcs.empty() && _contents.ptr->funcs[0].has_pure_definition) {
+    if (!_contents.ptr->funcs.empty() &&
+         _contents.ptr->funcs[0].has_pure_definition) {
         return;
     }
 
     if (_contents.ptr->uvars.empty()) {
-        Expr pure_val = _contents.ptr->input;
-
         // replace all occurances of union operations in input expression
-        // with their equivalent Function's
-
+        // with their equivalent Function calls
+        Expr pure_val = _contents.ptr->input;
+        substitute_union_with_func(pure_val);
         Function func;
         func.define(_contents.ptr->args, pure_val);
         _contents.ptr->func.push_back(func);
-
-
-    } else {
-
+    }
+    else {
         // create RDom for each union variable
         std::map<string,RDom> rdom;
         for (size_t i=0; i<_contents.ptr->uvars.size(); i++) {
@@ -355,25 +358,30 @@ void UnionReduction::convert_to_func() {
                     _contents.ptr->uvars[i].name())+".$r";
         }
 
-
         // loop over all union variables, emit one Halide reduction for each
-        // and replace the union variable in RHS with RDom
-
         for (size_t i=0; i<_contents.ptr->uvars.size(); it++) {
-            Function func;
-            UnionVar rx = _contents.ptr->uvars[i];
-            string    x = _contents.ptr->args[i];
+            // each union_variable is surely mapped to an RDom by now
+            // each union_variable is surely mapped to an arg in constructor
+            UnionVar ux = _contents.ptr->uvars[i];
+            RDom     rx = *(rdom[ux]);
+            string    x = _contents.ptr->args[*(uvar_to_arg[ux])];
 
-            if (i > 0) {
-                Expr identity = 0; // replace with identity of associative operation
-                func.define(_contents.ptr->args, identity);
+            Function func;
+
+            // pure definition
+            if (i == 0) {
+                // initialize with input expression where all occurances
+                // of other union reductions are replaced with their
+                // Function equivalent
+                Expr pure_val = _contents.ptr->input;
+                substitute_union_with_func(pure_val);
+                func.define(_contents.ptr->args, pure_val);
             }
             else {
-                Expr pure_val = _contents.ptr->input;
-
-                // replace all occurances of union operations in input expression
-                // with their equivalent Function's
-                func.define(_contents.ptr->args, identity);
+                // initialize with output of previous dimension reduction,
+                // call previous reduction at same args as this function
+                Expr pure_val = Call::make(func[i-1], _content.ptr->args);
+                func.define(_contents.ptr->args, pure_val);
             }
 
             // reduction definition
@@ -381,7 +389,10 @@ void UnionReduction::convert_to_func() {
             vector<Expr> reduction_vargs1;
             vector<Expr> reduction_vargs2;
             for (size_t i=0; i<_content.ptr->args.size(); i++) {
-                if (_content.ptr->args[i] == ) {
+                // LHS args are same as pure definition args, except that
+                // the arg mapped to union variable is replaced by RDom rx
+                // call args for RHS are same as LHS except rx replaced by rx-1
+                if (x == _content.ptr->args[i]) {
                     reduction_args.push_back(rx);
                     reduction_vargs1.push_back(rx);
                     reduction_vargs2.push_back(rx-1);
@@ -391,7 +402,8 @@ void UnionReduction::convert_to_func() {
                     reduction_vargs2.push_back(Var(_content.ptr->args[i]));
                 }
             }
-            Expr reduction_val = this->as_func(reduction_vargs) + this->as_func(reduction_vargs1);
+            Expr reduction_val = call_as_func(reduction_vargs1) +
+                                 call_as_func(reduction_vargs2);
 
             func.define_reduction(reduction_args, reduction_val);
 
@@ -405,7 +417,8 @@ vector<Function&> UnionReduction::funcs() const {
     vector<Function&> func_list;
 
     // convert to funcs if not alredy done
-    if (_contents.ptr->funcs.empty() || !_contents.ptr->funcs[0].has_pure_definition()) {
+    if (_contents.ptr->funcs.empty() ||
+       !_contents.ptr->funcs[0].has_pure_definition()) {
         convert_to_func();
     }
 
@@ -417,15 +430,19 @@ vector<Function&> UnionReduction::funcs() const {
     return func_list;
 }
 
-EXPORT Expr as_func(const vector<Expr>& args) const {
+EXPORT Expr call_as_func(const vector<Expr>& args) const {
     if (_contents.ptr->funcs.empty() || !_contents.ptr->funcs[0].has_pure_definition()) {
         convert_to_func();
     }
     if (args.size()==_contents.ptr->args.size()) {
-        cerr << "Call to Union operation as Halide::Internal::Function has incorrect number of arguments" << endl;
+        cerr << "Call to Union operation as Halide::Internal::Function ";
+        cerr << "has incorrect number of arguments" << endl;
         assert(false);
     }
-    return Call::make(_contents.ptr->funcs[], args);
+    // last function in the list represents the complete multi-dimensional
+    // union, each function in list is represents reduction along a perticular
+    // dimension
+    return Call::make(_contents.ptr->funcs[_contents.ptr->funcs.size()-1], args);
 }
 
 Expr UnionReduction::operator()(Expr x, Expr y) const {

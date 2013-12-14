@@ -55,6 +55,9 @@ struct SharedCudaContext {
     }
 } cuda_ctx;
 
+// A single global OpenCL context and command queue to share among modules.
+void * cl_ctx = 0;
+void * cl_q = 0;
 
 using std::vector;
 using std::string;
@@ -255,18 +258,17 @@ private:
 
 vector<Argument> CodeGen_GPU_Host::Closure::arguments() {
     vector<Argument> res;
-    map<string, Type>::const_iterator iter;
-    for (iter = vars.begin(); iter != vars.end(); ++iter) {
+    for (map<string, Type>::const_iterator iter = vars.begin(); iter != vars.end(); ++iter) {
         debug(2) << "var: " << iter->first << "\n";
         res.push_back(Argument(iter->first, false, iter->second));
     }
-    for (iter = reads.begin(); iter != reads.end(); ++iter) {
-        debug(2) << "read: " << iter->first << "\n";
-        res.push_back(Argument(iter->first, true, iter->second));
-    }
-    for (iter = writes.begin(); iter != writes.end(); ++iter) {
-        debug(2) << "write: " << iter->first << "\n";
-        res.push_back(Argument(iter->first, true, iter->second));
+    for (map<string, BufferRef>::const_iterator iter = buffers.begin(); iter != buffers.end(); ++iter) {
+        debug(2) << "buffer: " << iter->first;
+        if (iter->second.read) debug(2) << " (read)";
+        if (iter->second.write) debug(2) << " (write)";
+        debug(2) << "\n";
+
+        res.push_back(Argument(iter->first, true, iter->second.type));
     }
     return res;
 }
@@ -316,7 +318,9 @@ CodeGen_GPU_Host::~CodeGen_GPU_Host() {
     delete cgdev;
 }
 
-void CodeGen_GPU_Host::compile(Stmt stmt, string name, const vector<Argument> &args) {
+void CodeGen_GPU_Host::compile(Stmt stmt, string name,
+                               const vector<Argument> &args,
+                               const vector<Buffer> &images_to_embed) {
 
     init_module();
 
@@ -355,20 +359,14 @@ void CodeGen_GPU_Host::compile(Stmt stmt, string name, const vector<Argument> &a
     // module->setTargetTriple( ... );
 
     // Pass to the generic codegen
-    CodeGen::compile(stmt, name, args);
+    CodeGen::compile(stmt, name, args, images_to_embed);
 
     std::vector<char> kernel_src = cgdev->compile_to_src();
 
-    llvm::Type *kernel_src_type = ArrayType::get(i8, kernel_src.size());
-    GlobalVariable *kernel_src_global = new GlobalVariable(*module, kernel_src_type,
-                                                           true, GlobalValue::PrivateLinkage, 0,
-                                                           "halide_kernel_src");
-    ArrayRef<unsigned char> src_array((unsigned char *)&kernel_src[0], kernel_src.size());
-    kernel_src_global->setInitializer(ConstantDataArray::get(*context, src_array));
+    Value *kernel_src_ptr = create_constant_binary_blob(kernel_src, "halide_kernel_src");
 
     // Jump to the start of the function and insert a call to halide_init_kernels
     builder->SetInsertPoint(function->getEntryBlock().getFirstInsertionPt());
-    Value *kernel_src_ptr = builder->CreateConstInBoundsGEP2_32(kernel_src_global, 0, 0);
     Value *kernel_size = ConstantInt::get(i32, kernel_src.size());
     Value *init = module->getFunction("halide_init_kernels");
     assert(init && "Could not find function halide_init_kernels in initial module");
@@ -458,10 +456,19 @@ void CodeGen_GPU_Host::jit_finalize(ExecutionEngine *ee, Module *module, vector<
             reinterpret_bits<void (*)()>(f);
         cleanup_routines->push_back(cleanup_routine);
     } else if (target.features & Target::OpenCL) {
-        // When the module dies, we need to call halide_release
-        llvm::Function *fn = module->getFunction("halide_release");
-        assert(fn && "Could not find halide_release in module");
+        // Share the same cl_ctx, cl_q across all OpenCL modules.
+        llvm::Function *fn = module->getFunction("halide_set_cl_context");
+        assert(fn && "Could not find halide_set_cl_context in module");
         void *f = ee->getPointerToFunction(fn);
+        assert(f && "Could not find compiled form of halide_set_cl_context in module");
+        void (*set_cl_context)(void **, void **) =
+            reinterpret_bits<void (*)(void **, void **)>(f);
+        set_cl_context(&cl_ctx, &cl_q);
+
+        // When the module dies, we need to call halide_release
+        fn = module->getFunction("halide_release");
+        assert(fn && "Could not find halide_release in module");
+        f = ee->getPointerToFunction(fn);
         assert(f && "Could not find compiled form of halide_release in module");
         void (*cleanup_routine)() =
             reinterpret_bits<void (*)()>(f);
@@ -517,31 +524,34 @@ void CodeGen_GPU_Host::visit(const For *loop) {
         }
 
         // compile the kernel
-        string kernel_name = "kernel_" + loop->name;
+        string kernel_name = unique_name("kernel_" + loop->name, false);
         for (size_t i = 0; i < kernel_name.size(); i++) {
-            if (kernel_name[i] == '.') kernel_name[i] = '_';
+            switch (kernel_name[i]) {
+            case '$': 
+            case '.': 
+                kernel_name[i] = '_';
+                break;
+            default:
+                break;
+            }
         }
-        cgdev->compile(loop, kernel_name, c.arguments());
+        cgdev->add_kernel(loop, kernel_name, c.arguments());
 
-        map<string, Type>::iterator it;
-        for (it = c.reads.begin(); it != c.reads.end(); ++it) {
+        map<string, Closure::BufferRef>::iterator it;
+        for (it = c.buffers.begin(); it != c.buffers.end(); ++it) {
             // While internal buffers have all had their device
             // allocations done via static analysis, external ones
             // need to be dynamically checked
             Value *buf = sym_get(it->first + ".buffer");
             debug(4) << "halide_dev_malloc " << it->first << "\n";
             builder->CreateCall(dev_malloc_fn, buf);
-
+            
             // Anything dirty on the cpu that gets read on the gpu
             // needs to be copied over
-            debug(4) << "halide_copy_to_dev " << it->first << "\n";
-            builder->CreateCall(copy_to_dev_fn, buf);
-        }
-
-        for (it = c.writes.begin(); it != c.writes.end(); ++it) {
-            Value *buf = sym_get(it->first + ".buffer");
-            debug(4) << "halide_dev_malloc " << it->first << "\n";
-            builder->CreateCall(dev_malloc_fn, buf);
+            if (it->second.read) {
+                debug(4) << "halide_copy_to_dev " << it->first << "\n";
+                builder->CreateCall(copy_to_dev_fn, buf);
+            }
         }
 
         // get the actual name of the generated kernel for this loop
@@ -616,10 +626,12 @@ void CodeGen_GPU_Host::visit(const For *loop) {
         builder->CreateCall(dev_run_fn, launch_args);
 
         // mark written buffers dirty
-        for (it = c.writes.begin(); it != c.writes.end(); ++it) {
-            debug(4) << "setting dev_dirty " << it->first << " (write)\n";
-            Value *buf = sym_get(it->first + ".buffer");
-            builder->CreateStore(ConstantInt::get(i8, 1), buffer_dev_dirty_ptr(buf));
+        for (it = c.buffers.begin(); it != c.buffers.end(); ++it) {
+            if (it->second.write) {
+                debug(4) << "setting dev_dirty " << it->first << " (write)\n";
+                Value *buf = sym_get(it->first + ".buffer");
+                builder->CreateStore(ConstantInt::get(i8, 1), buffer_dev_dirty_ptr(buf));
+            }
         }
 
         // Pop the shared memory allocations from the symbol table
@@ -656,7 +668,7 @@ void CodeGen_GPU_Host::visit(const Allocate *alloc) {
             // Save the stack pointer if we haven't already
             saved_stack = save_stack();
         }
-        buf = builder->CreateAlloca(buffer_t);
+        buf = builder->CreateAlloca(buffer_t_type);
         Value *zero32 = ConstantInt::get(i32, 0),
             *one32  = ConstantInt::get(i32, 1),
             *null64 = ConstantInt::get(i64, 0),
@@ -790,5 +802,4 @@ void CodeGen_GPU_Host::visit(const Call *call) {
 
     CodeGen::visit(call);
 }
-
 }}

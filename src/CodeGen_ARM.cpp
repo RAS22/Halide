@@ -13,6 +13,22 @@
 #include "integer_division_table.h"
 #include "LLVM_Headers.h"
 
+// Native client llvm relies on global flags to control sandboxing on
+// arm, because they expect you to be coming from the command line.
+#if WITH_NATIVE_CLIENT
+#include <llvm/Support/CommandLine.h>
+namespace llvm {
+extern cl::opt<bool> FlagSfiData,
+    FlagSfiLoad,
+    FlagSfiStore,
+    FlagSfiStack,
+    FlagSfiBranch,
+    FlagSfiDisableCP,
+    FlagSfiZeroMask;
+}
+extern llvm::cl::opt<bool> ReserveR9;
+#endif
+
 namespace Halide {
 namespace Internal {
 
@@ -23,7 +39,6 @@ using std::pair;
 using std::make_pair;
 
 using namespace llvm;
-
 
 namespace {
 // cast operators
@@ -127,7 +142,7 @@ CodeGen_ARM::CodeGen_ARM(Target t) : CodeGen_Posix(),
     // automatically. It also means that vshiftn catches these
     // patterns instead of letting them fall through to the natural
     // bitcode that triggers llvm's recognition.
-    #if defined(LLVM_VERSION_MINOR) && LLVM_VERSION_MINOR < 4
+    #if LLVM_VERSION < 34
     casts.push_back(Pattern("vaddhn.v8i8", _i8((wild_i16x8 + wild_i16x8)/256)));
     casts.push_back(Pattern("vaddhn.v4i16", _i16((wild_i32x4 + wild_i32x4)/65536)));
     casts.push_back(Pattern("vaddhn.v8i8", _u8((wild_u16x8 + wild_u16x8)/256)));
@@ -325,7 +340,9 @@ CodeGen_ARM::CodeGen_ARM(Target t) : CodeGen_Posix(),
 }
 
 
-void CodeGen_ARM::compile(Stmt stmt, string name, const vector<Argument> &args) {
+void CodeGen_ARM::compile(Stmt stmt, string name,
+                          const vector<Argument> &args,
+                          const vector<Buffer> &images_to_embed) {
 
     init_module();
 
@@ -352,7 +369,19 @@ void CodeGen_ARM::compile(Stmt stmt, string name, const vector<Argument> &args) 
         }
     } else if (target.os == Target::NaCl) {
         assert(target.bits == 32 && "Not sure what llvm target triple to use for 64-bit arm nacl");
-        module->setTargetTriple("arm-nacl-eabi");
+        module->setTargetTriple("arm-unknown-nacl-eabi");
+        #if WITH_NATIVE_CLIENT
+        // The ARM Nacl backend relies on global switches being set to do
+        // the sandboxing, so set them here.
+        llvm::FlagSfiData = true;
+        llvm::FlagSfiLoad = true;
+        llvm::FlagSfiStore = true;
+        llvm::FlagSfiStack = true;
+        llvm::FlagSfiBranch = true;
+        llvm::FlagSfiDisableCP = true;
+        llvm::FlagSfiZeroMask = false;
+        ReserveR9 = true;
+        #endif
     } else if (target.os == Target::Linux) {
         if (target.bits == 32) {
             module->setTargetTriple("arm-linux-gnueabihf");
@@ -365,7 +394,7 @@ void CodeGen_ARM::compile(Stmt stmt, string name, const vector<Argument> &args) 
     debug(1) << "Target triple of initial module: " << module->getTargetTriple() << "\n";
 
     // Pass to the generic codegen
-    CodeGen::compile(stmt, name, args);
+    CodeGen::compile(stmt, name, args, images_to_embed);
 
     // Optimize
     CodeGen::optimize_module();

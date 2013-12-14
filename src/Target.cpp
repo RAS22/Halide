@@ -348,6 +348,7 @@ void link_modules(std::vector<llvm::Module *> &modules) {
                        "halide_shutdown_thread_pool",
                        "halide_shutdown_trace",
                        "halide_set_cuda_context",
+                       "halide_set_cl_context",
                        "halide_dev_sync",
                        "halide_release",
                        "halide_current_time_ns",
@@ -476,23 +477,30 @@ llvm::Module *get_initial_module_for_ptx_device(llvm::LLVMContext *c) {
     // TODO: select this based on sm_ version flag in Target when
     // we add target specific flags.
     llvm::Module *module = get_initmod_ptx_compute_20_ll(c);
-
-    for (llvm::Module::iterator iter = module->begin(); iter != module->end(); iter++) {
-        llvm::Function *f = (llvm::Function *)(iter);
-
-	// This is intended to set all definitions (not extern declarations)
-	// to "available externally" which should guarantee they do not exist
-	// after the resulting module is finalized to code. That is they must
-	// be inlined to be used.
-
-	if (f->hasFnAttribute(llvm::Attribute::AlwaysInline)) {
-	    f->setLinkage(llvm::GlobalValue::AvailableExternallyLinkage);
-        }
-    }
-
     modules.push_back(module);
 
     link_modules(modules);
+
+    // For now, the PTX backend does not handle calling functions. So mark all functions
+    // AvailableExternally to ensure they are inlined or deleted.
+    for (llvm::Module::iterator iter = modules[0]->begin(); iter != modules[0]->end(); iter++) {
+        llvm::Function *f = (llvm::Function *)(iter);
+
+        // This is intended to set all definitions (not extern declarations)
+        // to "available externally" which should guarantee they do not exist
+        // after the resulting module is finalized to code. That is they must
+        // be inlined to be used.
+	//
+	// However libdevice has a few routines that are marked
+	// "noinline" which must either be changed to alow inlining or
+	// preserved in generated code. This preserves the intent of
+	// keeping these routines out-of-line and hence called by
+	// not marking them AvailableExternally.
+
+        if (!f->isDeclaration() && !f->hasFnAttribute(llvm::Attribute::NoInline)) {
+            f->setLinkage(llvm::GlobalValue::AvailableExternallyLinkage);
+        }
+    }
 
     return modules[0];
 }

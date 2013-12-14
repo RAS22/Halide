@@ -28,7 +28,9 @@ public:
      * CodeGen::compile_to_file or
      * CodeGen::compile_to_function_pointer to get at the x86 machine
      * code. */
-    void compile(Stmt stmt, std::string name, const std::vector<Argument> &args);
+    void compile(Stmt stmt, std::string name,
+                 const std::vector<Argument> &args,
+                 const std::vector<Buffer> &images_to_embed);
 
 protected:
     using CodeGen_X86::visit;
@@ -63,7 +65,7 @@ protected:
     /** Reaches inside the module at sets it to use a single shared
      * cuda context */
     void jit_finalize(llvm::ExecutionEngine *ee, llvm::Module *mod, std::vector<void (*)()> *cleanup_routines);
-
+    
     static bool lib_cuda_linked;
 
     static CodeGen_GPU_Dev* make_dev(Target);

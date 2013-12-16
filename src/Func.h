@@ -302,6 +302,9 @@ public:
      * not contain free variables). */
     EXPORT explicit Func(Expr e);
 
+    /** Warp an internal Function object in a Func object */
+    EXPORT Func(Internal::Function f) : func(f) {}
+
     /** Evaluate this function over some rectangular domain and return
      * the resulting buffer or buffers. Performs compilation if the
      * Func has not previously been realized and jit_compile has not

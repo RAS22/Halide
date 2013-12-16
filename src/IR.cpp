@@ -61,6 +61,7 @@ template<> EXPORT IRNodeType ExprNode<Load>::_type_info = {};
 template<> EXPORT IRNodeType ExprNode<Ramp>::_type_info = {};
 template<> EXPORT IRNodeType ExprNode<Broadcast>::_type_info = {};
 template<> EXPORT IRNodeType ExprNode<Call>::_type_info = {};
+template<> EXPORT IRNodeType ExprNode<UnionCall>::_type_info = {};
 template<> EXPORT IRNodeType ExprNode<Let>::_type_info = {};
 template<> EXPORT IRNodeType StmtNode<LetStmt>::_type_info = {};
 template<> EXPORT IRNodeType StmtNode<AssertStmt>::_type_info = {};

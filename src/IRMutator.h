@@ -71,6 +71,7 @@ protected:
     virtual void visit(const Ramp *);
     virtual void visit(const Broadcast *);
     virtual void visit(const Call *);
+    virtual void visit(const UnionCall *);
     virtual void visit(const Let *);
     virtual void visit(const LetStmt *);
     virtual void visit(const AssertStmt *);

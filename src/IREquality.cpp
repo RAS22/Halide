@@ -1,4 +1,3 @@
-
 #include "IR.h"
 #include "IRPrinter.h"
 #include "Debug.h"
@@ -214,6 +213,25 @@ public:
         } else if (e->value_index > op->value_index) {
             result = 1;
         } else if (e->args.size() < op->args.size()) {
+            result = -1;
+        } else if (e->args.size() > op->args.size()) {
+            result = 1;
+        } else {
+            for (size_t i = 0; (result == 0) && (i < e->args.size()); i++) {
+                expr = e->args[i];
+                op->args[i].accept(this);
+            }
+        }
+    }
+
+    void visit(const UnionCall *op) {
+        if (result || expr.same_as(op) || compare_node_types(expr, op)) return;
+
+        const UnionCall *e = expr.as<UnionCall>();
+
+        if (compare_names(e->name, op->name)) return;
+
+        if (e->args.size() < op->args.size()) {
             result = -1;
         } else if (e->args.size() > op->args.size()) {
             result = 1;

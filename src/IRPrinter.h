@@ -94,6 +94,7 @@ protected:
     void visit(const Ramp *);
     void visit(const Broadcast *);
     void visit(const Call *);
+    void visit(const UnionCall *);
     void visit(const Let *);
     void visit(const LetStmt *);
     void visit(const AssertStmt *);

@@ -40,7 +40,7 @@ struct UnionReductionContents {
     std::vector<UnionReduction> sub_unions;
     std::vector<Function>       funcs;
     std::map<std::string,Expr>  bound;
-    std::map<std::string,int>   args_to_uvar;
+    std::map<std::string,int>   arg_to_uvar;
     std::map<std::string,int>   uvar_to_arg;
 };
 
@@ -64,15 +64,14 @@ private:
     IntrusivePtr<UnionReductionContents> _contents;
 
     EXPORT void convert_to_func();
-    EXPORT Expr call_as_func(const std::vector<Expr>& args) const;
 
 public:
     EXPORT UnionReduction();
     EXPORT UnionReduction(const IntrusivePtr<UnionReductionContents>&);
     EXPORT UnionReduction(Expr in,
-            const std::vector<std::string> &outvar,
-            const std::vector<UnionVar> &uvar,
-            const std::string &name);
+            std::vector<std::string> args,
+            std::vector<UnionVar> uvars,
+            std::string name);
 
     // Accessor functions
     EXPORT const Type                        &type()   const;
@@ -83,7 +82,7 @@ public:
     EXPORT const std::vector<UnionReduction> &sub_unions() const;
 
     // Conversion to Halide Func
-    EXPORT std::vector<Function&> &func() const;
+    EXPORT std::vector<Function> funcs();
 
     // Bounds
     EXPORT UnionReduction &bound(std::string, Expr);
@@ -101,35 +100,12 @@ public:
     // Splitting functions
     EXPORT UnionReduction& split(std::string x, int tile);
 
-    // Call the union operation as an input to other unions/functions
-    EXPORT Expr operator()(Expr x) const;
-    EXPORT Expr operator()(Expr x, Expr y) const;
-    EXPORT Expr operator()(Expr x, Expr y, Expr z) const;
-    EXPORT Expr operator()(Expr x, Expr y, Expr z, Expr w) const;
-    EXPORT Expr operator()(Expr x, Expr y, Expr z, Expr w, Expr u) const;
-    EXPORT Expr operator()(Expr x, Expr y, Expr z, Expr w, Expr u, Expr v) const;
-    EXPORT Expr operator()(std::vector<Expr>) const;
-
-    EXPORT Expr operator()(std::string x) const;
-    EXPORT Expr operator()(std::string x, std::string y) const;
-    EXPORT Expr operator()(std::string x, std::string y, std::string z) const;
-    EXPORT Expr operator()(std::string x, std::string y, std::string z, std::string w) const;
-    EXPORT Expr operator()(std::string x, std::string y, std::string z, std::string w, std::string u) const;
-    EXPORT Expr operator()(std::string x, std::string y, std::string z, std::string w, std::string u, std::string v) const;
-    EXPORT Expr operator()(std::vector<std::string>) const;
+    // Call to the union operation
+    EXPORT Expr call_as_func (const std::vector<Expr>&) const;
+    EXPORT Expr call_as_union(const std::vector<Expr>&) const;
+    EXPORT Expr call_as_union(const std::vector<std::string>&) const;
 
     EXPORT std::ostream &print(std::ostream&) const;
-};
-
-
-class UnionFusion {
-private:
-    std::vector<UnionReduction> union_op;
-public:
-    EXPORT UnionFusion();
-    EXPORT UnionFusion(const UnionReduction& a, const UnionReduction& b);
-    EXPORT UnionFusion(const UnionReduction& a, const UnionReduction& b, const UnionReduction& c);
-//    EXPORT Func convert_to_func() const;
 };
 
 }

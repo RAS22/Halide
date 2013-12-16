@@ -919,6 +919,26 @@ struct Evaluate : public StmtNode<Evaluate> {
 namespace Halide {
 namespace Internal {
 
+/** A union reduction call. */
+struct UnionCall : public ExprNode<UnionCall> {
+    std::string name;
+    std::vector<Expr> args;
+    UnionReduction union_op;
+
+    // Convenience function
+    static Expr make(const UnionReduction& u, const std::vector<Expr> &args) {
+       for (size_t i = 0; i < args.size(); i++) {
+            assert(args[i].defined() && "Call of undefined");
+        }
+       UnionCall* node = new UnionCall;
+       node->type = u.type();
+       node->name = u.name();
+       node->args = args;
+       node->union_op = u;
+       return node;
+    }
+};
+
 /** A function call. This can represent a call to some extern
  * function (like sin), but it's also our multi-dimensional
  * version of a Load, so it can be a load from an input image, or
@@ -928,7 +948,7 @@ namespace Internal {
 struct Call : public ExprNode<Call> {
     std::string name;
     std::vector<Expr> args;
-    typedef enum {Image, Extern, Halide, UnionOperation, Intrinsic} CallType;
+    typedef enum {Image, Extern, Halide, Intrinsic} CallType;
     CallType call_type;
 
     // Halide uses calls internally to represent certain operations
@@ -959,10 +979,6 @@ struct Call : public ExprNode<Call> {
     // If it's a call to another halide function, this call node
     // holds onto a pointer to that function.
     Function func;
-
-    // if it's call to a union operation, this call node holds onto a
-    // pointer to that operation.
-    UnionReduction union_op;
 
     // If that function has multiple values, which value does this
     // call node refer to?
@@ -1007,28 +1023,6 @@ struct Call : public ExprNode<Call> {
         node->value_index = value_index;
         node->image = image;
         node->param = param;
-        return node;
-    }
-
-
-    // Overloaded make function just for Union operations, currently kept
-    // separate from above make function to avoid breaking existing Halide
-    // code, to be merged with the above make function later on
-    static Expr make(UnionReduction u, const std::vector<Expr> &args) {
-        for (size_t i = 0; i < args.size(); i++) {
-            assert(args[i].defined() && "Call of undefined");
-        }
-
-        Call *node = new Call;
-        node->type = u.type();
-        node->name = u.name();
-        node->args = args;
-        node->call_type = UnionOperation;
-        node->value_index = 0;
-        node->union_op = u;
-        node->func = Function();
-        node->image= Buffer();
-        node->param= Parameter();
         return node;
     }
 

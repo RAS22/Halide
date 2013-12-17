@@ -39,7 +39,8 @@ struct UnionReductionContents {
     std::vector<std::string>          args;
     std::vector<UnionReduction>       sub_unions;
     std::vector<Function>             funcs;
-    std::map<std::string,Expr>        bound;
+    std::map<std::string,Expr>        lower_bound;
+    std::map<std::string,Expr>        upper_bound;
     std::map<std::string,std::string> arg_to_uvar;
     std::map<std::string,std::string> uvar_to_arg;
 };
@@ -86,8 +87,9 @@ public:
     EXPORT std::vector<Function> funcs();
 
     // Bounds
-    EXPORT UnionReduction &bound(std::string, Expr);
-    EXPORT const Expr     &bound(std::string) const;
+    EXPORT UnionReduction &bound(std::string, Expr, Expr);
+    EXPORT const Expr     &lower_bound(std::string) const;
+    EXPORT const Expr     &upper_bound(std::string) const;
 
     // // Checking functions
     // EXPORT bool is_identical (const UnionReduction&) const;

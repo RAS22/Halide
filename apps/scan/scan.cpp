@@ -7,19 +7,28 @@
 using namespace Halide;
 using namespace Halide::Internal;
 
-void print(Func f, std::ostream& s) {
+std::ostream &operator<<(std::ostream &s, Func f) {
     if (f.defined()) {
         std::vector<Var> args = f.args();
         Expr value = f.value();
+        s << "Func " << f.name() << ";\n";
         s << f.name() << "(";
         for (size_t i=0; i<args.size(); i++) {
             s << args[i];
             if (i<args.size()-1)
                 s << ",";
         }
-        s << ") = " << value << "\n";
+        s << ") = " << value << ";\n";
     }
+
     for (size_t j=0; j<f.num_reduction_definitions(); j++) {
+        for (size_t k=0; k<f.reduction_domain(j).dimensions(); k++) {
+            std::string r = f.reduction_domain(j)[k].name();
+            r.erase(r.find(".x$r"));
+            s << "RDom " << r  << "("
+              << f.reduction_domain(j)[k].min()   << ","
+              << f.reduction_domain(j)[k].extent()<< "); ";
+        }
         std::vector<Expr> args = f.reduction_args(j);
         Expr value = f.reduction_value(j);
         s << f.name() << "(";
@@ -28,59 +37,94 @@ void print(Func f, std::ostream& s) {
             if (i<args.size()-1)
                 s << ",";
         }
-        s << ") = " << value << "\n";
+        s << ") = " << value << ";\n";
     }
-    s << std::endl;
+    return s;
 }
 
 int main() {
-    unsigned int width = 30;
+    unsigned int width = 20;
     unsigned int tile  = 5;
 
-    Image<int> input(width, width, "Input");
+    Image<int> input(width, width);
+    Image<int> reference(width, width);
+    Image<int> output(width, width);
+
+    // -------------------------------------------------------------------------
 
     for (size_t j=0; j<width; j++)
         for (size_t i=0; i<width; i++)
-            input(i,j) = rand() % 10;
-
-    // -------------------------------------------------------------------------
+            input(i,j) = rand() % 5;
+    for (size_t j=0; j<width; j++)
+        for (size_t i=0; i<width; i++)
+            reference(i,j) = input(i,j)
+                + (i>0 ? reference(i-1,j) : 0)
+                + (j>0 ? reference(i,j-1) : 0)
+                - (i>0 && j>0 ? reference(i-1,j-1) : 0);
 
     Var x("x");
     Var y("y");
     UnionVar rx(0, x, "rx");
     UnionVar ry(0, y, "ry");
 
+    // -------------------------------------------------------------------------
+
+    Func Input("Input");
+    Input(x,y) = input(clamp(x, 0, int(width-1)), clamp(y, 0, int(width-1)));
+
+    // -------------------------------------------------------------------------
+
     UnionReduction union_operation(
-            input(rx, ry),          // expression to be union'ed
-            vec(x.name(),y.name()), // output domain
-            vec(rx, ry), "U");      // union domain
+            Input(rx, ry),
+            vec(x.name(),y.name()),
+            vec(rx, ry), "U");
 
     union_operation
-        .bound(x.name(), int(width))
-        .bound(y.name(), int(width));
+        .bound(x.name(), 0, int(width))
+        .bound(y.name(), 0, int(width));
 
     // -------------------------------------------------------------------------
 
-    std::cerr << "\nOriginal Union operation\n" << union_operation << std::endl;
+    std::cout << "\nOriginal Union operation\n" << union_operation << std::endl;
+
+    union_operation.split(x.name(), tile).split(y.name(), tile);
+    std::cout << "\nAfter spitting along x and y\n" << union_operation << std::endl;
 
     // -------------------------------------------------------------------------
 
-    union_operation.split(x.name(), tile);
-    std::cerr << "\nAfter spitting along x\n" << union_operation << std::endl;
+    Func f_main("Main");
 
-    // -------------------------------------------------------------------------
-
-    //union_operation.split(y.name(), tile);
-    std::cerr << "\nAfter spitting along y\n" << union_operation << std::endl;
-
-    // -------------------------------------------------------------------------
-
-    std::cerr << "\nHalide Functions for the above" << std::endl;
+    std::cout << "\n\nConversion into Functions\n" << std::endl;
     std::vector<Function> func_list = union_operation.funcs();
     for (size_t i=0; i<func_list.size(); i++) {
         Func f(func_list[i]);
-        print(f, std::cerr);
+        if (f.name() == "U_func") {
+            f_main = f;
+        }
+        std::cout << f << std::endl;
     }
+
+    // -------------------------------------------------------------------------
+
+    std::cout << "Compiling JIT" << std::endl;
+    f_main.compile_jit();
+    std::cout << "Realizing" << std::endl;
+    f_main.realize(output);
+    std::cout << "done" << std::endl;
+
+    // -------------------------------------------------------------------------
+
+    int diff = 0;
+    for (size_t j=0; j<width; j++)
+        for (size_t i=0; i<width; i++)
+            diff += std::abs(reference(i,j) - output(i,j));
+
+    if (diff) {
+        std::cerr << "Error: difference between output and reference: " << diff << std::endl;
+        assert(false);
+    }
+
+    // -------------------------------------------------------------------------
 
     return EXIT_SUCCESS;
 }

@@ -24,11 +24,16 @@ ifneq (,$(findstring cuda,$(HL_TARGET)))
   CUDA_LDFLAGS=-L/usr/lib/nvidia-current -lcuda
 endif
 
-all: scan
+all: scan test
 
-scan: ../../ ../../$(LIB_HALIDE) scan.cpp
+halide_lib:
 	$(MAKE) -C ../../ $(LIB_HALIDE) -j12
+
+test: halide_lib test.cpp
+	$(CXX) $(CPPFLAGS) test.cpp -I ../../include/ -I ../support ../../$(LIB_HALIDE) -o test  -lpthread -ldl -lncurses $(PNGFLAGS) $(CUDA_LDFLAGS)
+
+scan: halide_lib scan.cpp
 	$(CXX) $(CPPFLAGS) scan.cpp -I ../../include/ -I ../support ../../$(LIB_HALIDE) -o scan  -lpthread -ldl -lncurses $(PNGFLAGS) $(CUDA_LDFLAGS)
 
 clean:
-	rm -f scan
+	rm -f test scan

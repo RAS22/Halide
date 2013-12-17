@@ -303,7 +303,7 @@ public:
     EXPORT explicit Func(Expr e);
 
     /** Warp an internal Function object in a Func object */
-    EXPORT Func(Internal::Function f) : func(f) {}
+    EXPORT Func(const Internal::Function &f);
 
     /** Evaluate this function over some rectangular domain and return
      * the resulting buffer or buffers. Performs compilation if the

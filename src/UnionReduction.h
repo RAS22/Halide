@@ -31,17 +31,17 @@ struct UnionVarContents {
 };
 
 struct UnionReductionContents {
-    mutable RefCount            ref_count;
-    Expr                        input;
-    Type                        type;
-    std::string                 name;
-    std::vector<UnionVar>       uvars;
-    std::vector<std::string>    args;
-    std::vector<UnionReduction> sub_unions;
-    std::vector<Function>       funcs;
-    std::map<std::string,Expr>  bound;
-    std::map<std::string,int>   arg_to_uvar;
-    std::map<std::string,int>   uvar_to_arg;
+    mutable RefCount                  ref_count;
+    Expr                              input;
+    Type                              type;
+    std::string                       name;
+    std::vector<UnionVar>             uvars;
+    std::vector<std::string>          args;
+    std::vector<UnionReduction>       sub_unions;
+    std::vector<Function>             funcs;
+    std::map<std::string,Expr>        bound;
+    std::map<std::string,std::string> arg_to_uvar;
+    std::map<std::string,std::string> uvar_to_arg;
 };
 
 class UnionVar {
@@ -63,6 +63,7 @@ class UnionReduction {
 private:
     IntrusivePtr<UnionReductionContents> _contents;
 
+    // Map union variables to args
     EXPORT void convert_to_func();
 
 public:

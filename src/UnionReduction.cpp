@@ -76,10 +76,38 @@ public:
     SubstituteUnionWithFunc() {}
 };
 
-Expr substitute_union_with_func(const Expr& expr) {
+Expr substitute_union_with_func(Expr expr) {
     SubstituteUnionWithFunc s;
     return s.mutate(expr);
 }
+
+// -----------------------------------------------------------------------------
+
+// Extract the list of union variables in Expr
+class ExtractUnionVars : public IRVisitor {
+private:
+    using IRVisitor::visit;
+    void visit(const Variable *op) {
+        if (op->reduction_domain.defined()) {
+            for (size_t i=0; i<op->reduction_domain.domain().size(); i++) {
+                uvars.push_back(UnionVar(
+                            op->reduction_domain.domain()[i].min,
+                            op->reduction_domain.domain()[i].extent,
+                            op->reduction_domain.domain()[i].var));
+            }
+        }
+    }
+public:
+    vector<UnionVar> uvars;
+    ExtractUnionVars() {}
+};
+
+static vector<UnionVar> extract_union_vars(Expr e) {
+    ExtractUnionVars extract;
+    e.accept(&extract);
+    return extract.uvars;
+}
+
 
 // -----------------------------------------------------------------------------
 
@@ -102,7 +130,7 @@ UnionVar::UnionVar(Expr m, Expr e, std::string n) {
     if (!_contents.defined()) {
         _contents = new UnionVarContents;
     }
-    _contents.ptr->var = unique_name(n);
+    _contents.ptr->var = n;
     _contents.ptr->min = m;
     _contents.ptr->extent = e;
 
@@ -110,27 +138,38 @@ UnionVar::UnionVar(Expr m, Expr e, std::string n) {
     _contents.ptr->domain = ReductionDomain(vec(v));
 }
 
-const string& UnionVar::name()   const { return _contents.ptr->var;    }
-const Expr&   UnionVar::min()    const { return _contents.ptr->min;    }
-const Expr&   UnionVar::extent() const { return _contents.ptr->extent; }
+string UnionVar::name()   const { return _contents.ptr->var;    }
+Expr   UnionVar::min()    const { return _contents.ptr->min;    }
+Expr   UnionVar::extent() const { return _contents.ptr->extent; }
 
-bool UnionVar::same_as(const UnionVar &other) const { return _contents.same_as(other._contents); }
-
-UnionVar::operator Expr() const { return Variable::make(Int(32), _contents.ptr->var, _contents.ptr->domain); }
+UnionVar::operator Expr() const {
+    return Variable::make(Int(32),
+            _contents.ptr->var,
+            _contents.ptr->domain);
+}
 
 // -----------------------------------------------------------------------------
 
-UnionReduction::UnionReduction() : _contents(new UnionReductionContents) {
-    _contents.ptr->name = "Union_default";
+std::string erase_all_occurances(std::string& subject, std::string search) {
+    size_t pos = 0;
+    while ((pos = subject.find(search, pos)) != std::string::npos) {
+        subject.erase(pos, search.length());
+    }
+    return subject;
+}
+
+// -----------------------------------------------------------------------------
+
+UnionReduction::UnionReduction() : _contents(NULL) {
+}
+
+UnionReduction::UnionReduction(string name) : _contents(new UnionReductionContents) {
+    _contents.ptr->name = unique_name(name);
 }
 
 UnionReduction::UnionReduction(const IntrusivePtr<UnionReductionContents> &c) : _contents(c) {}
 
-UnionReduction::UnionReduction(Expr in,
-        vector<string>   args,
-        vector<UnionVar> uvars,
-        string           name) {
-
+UnionReduction::UnionReduction(Expr in, vector<string> args, string name) {
     if (!_contents.defined()) {
         _contents = new UnionReductionContents;
     }
@@ -139,7 +178,7 @@ UnionReduction::UnionReduction(Expr in,
     _contents.ptr->input = in;
     _contents.ptr->type  = in.type();
     _contents.ptr->args  = args;
-    _contents.ptr->uvars = uvars;
+    _contents.ptr->uvars = extract_union_vars(in);
 
     // remove all unused union variables
     for (size_t i=0; i<_contents.ptr->uvars.size(); i++) {
@@ -193,7 +232,7 @@ UnionReduction& UnionReduction::bound(string v, Expr min, Expr max) {
     return *this;
 }
 
-const Expr& UnionReduction::lower_bound(string v) const {
+Expr UnionReduction::lower_bound(string v) const {
     map<string,Expr>::iterator it = _contents.ptr->lower_bound.find(v);
     bool var_found = (it != _contents.ptr->lower_bound.end());
     if (!var_found) {
@@ -203,7 +242,7 @@ const Expr& UnionReduction::lower_bound(string v) const {
     return it->second;
 }
 
-const Expr& UnionReduction::upper_bound(string v) const {
+Expr UnionReduction::upper_bound(string v) const {
     map<string,Expr>::iterator it = _contents.ptr->upper_bound.find(v);
     bool var_found = (it != _contents.ptr->upper_bound.end());
     if (!var_found) {
@@ -213,26 +252,26 @@ const Expr& UnionReduction::upper_bound(string v) const {
     return it->second;
 }
 
-const string& UnionReduction::name()  const { return _contents.ptr->name; }
-const Type&   UnionReduction::type()  const { return _contents.ptr->type; }
-const Expr&   UnionReduction::input() const { return _contents.ptr->input;}
+string UnionReduction::name()  const { return _contents.ptr->name; }
+Type   UnionReduction::type()  const { return _contents.ptr->type; }
+Expr   UnionReduction::value() const { return _contents.ptr->input;}
 
-const vector<UnionVar>&       UnionReduction::uvars()      const { return _contents.ptr->uvars;  }
-const vector<string>&         UnionReduction::args()       const { return _contents.ptr->args;   }
-const vector<UnionReduction>& UnionReduction::sub_unions() const { return _contents.ptr->sub_unions; }
+vector<UnionVar>       UnionReduction::uvars()      const { return _contents.ptr->uvars;  }
+vector<string>         UnionReduction::args()       const { return _contents.ptr->args;   }
+vector<UnionReduction> UnionReduction::sub_unions() const { return _contents.ptr->sub_unions; }
 
 
 UnionReduction& UnionReduction::split(string x, int tile) {
     // check if the variable to be split exists
     // yes => then go ahead and split it
     // no  => nothing to do, return
-    int split_var_index = -1;
-    for (size_t i=0; split_var_index<0 && i<_contents.ptr->args.size(); i++) {
+    int split_var_idx = -1;
+    for (size_t i=0; split_var_idx<0 && i<_contents.ptr->args.size(); i++) {
         if (x == _contents.ptr->args[i]) {
-            split_var_index = i;
+            split_var_idx = i;
         }
     }
-    if (split_var_index<0) return *this;
+    if (split_var_idx<0) return *this;
 
     // check if the variable to be split corresponds to a union variable
     // yes => go ahead and split
@@ -245,53 +284,85 @@ UnionReduction& UnionReduction::split(string x, int tile) {
     }
 
     // find the index of the union variable mapped to the argument being split
-    int split_uvar_index = -1;
+    int split_uvar_idx = -1;
     string mapped_uvar = _contents.ptr->arg_to_uvar.find(x)->second;
     for (size_t i=0; i<_contents.ptr->uvars.size(); i++) {
         if (mapped_uvar == _contents.ptr->uvars[i].name())
-            split_uvar_index = i;
+            split_uvar_idx = i;
     }
 
-    UnionVar rx = _contents.ptr->uvars[split_uvar_index];
-
-    // bound for variable to be split
-    // necessary for determining union domains
-    // raise an error if bound is not set
-    Expr x_extent = upper_bound(x);
+    // union variable mappped to variable being split
+    UnionVar rx = _contents.ptr->uvars[split_uvar_idx];
 
     // inner/outer variable after split
     string xi = x + "i";
     string xo = x + "o";
 
-    // inner/outer union variables after split,
-    // TODO: valid only for scan, not box filter
-    Expr rxi_extent = tile;
-    Expr rxo_extent = substitute(x, x_extent, rx.extent()/tile);
+    // inner/outer union variables after split
+    // inner term computes over the same domain as original union
+    // outer terms computes over all tiles
+    //UnionVar rxi(substitute(x,xi,rx.min()), substitute(x,xi,rx.extent()), rx.name()+"_i");
+    UnionVar rxi(simplify(substitute(x,xi,rx.min())), Var(xi), rx.name()+"_i");
+    UnionVar rxo(0, Var(xo), rx.name()+"_o");
 
-    UnionVar rxi(0, rxi_extent, rx.name()+"i");
-    UnionVar rxo(0, rxo_extent, rx.name()+"o");
+    // names of union operations to be generated
+    string intra_union_name= _contents.ptr->name+"_IntraUnion_"+x;
+    string intra_tail_name = _contents.ptr->name+"_IntraTail_"+x;
+    string tail_union_name = _contents.ptr->name+"_TailUnion_"+x;
 
-    // replace the x with xo,xi
-    vector<string> args = _contents.ptr->args;
-    args.insert(args.begin()+split_var_index+1, xi);
-    args.insert(args.begin()+split_var_index+1, xo);
-    args.erase (args.begin()+split_var_index);
+    vector<string> args_inner;
+    vector<string> args_tail;
+    vector<string> args_outer;
+    vector<Expr> call_args_inner;
+    vector<Expr> call_args_tail;
 
-    // replace the rx with rxi for intra tile input expression
-    vector<UnionVar> uvar_inner = _contents.ptr->uvars;
-    uvar_inner.insert(uvar_inner.begin()+split_uvar_index+1, rxi);
-    uvar_inner.erase (uvar_inner.begin()+split_uvar_index);
-
-    // intra tile result: replace rx by t.xo+rxi in input
-    // expression and x by xo,xi in args
+    // intra tile result:
+    // replace rx by t.xo+rxi in expression
+    // replace x by xo,xi in args
+    for (size_t i=0; i<_contents.ptr->args.size(); i++) {
+        if (_contents.ptr->args[i] == x) {
+            args_inner.push_back(xo);
+            args_inner.push_back(xi);
+        } else {
+            args_inner.push_back(_contents.ptr->args[i]);
+        }
+    }
     Expr input_expr_inner = substitute(rx.name(), Var(xo)*tile + rxi, _contents.ptr->input);
-    UnionReduction intra_tile(input_expr_inner, args, uvar_inner, _contents.ptr->name+"_Intra_"+x);
+    UnionReduction intra_union(input_expr_inner, args_inner, intra_union_name);
 
-    // inter tile result: rxo is the only union variable,
-    // replace xo by rxo in call to intra result
-    vector<UnionVar> uvar_outer = vec(rxo);
-    Expr input_expr_outer = substitute(xo, rxo, intra_tile.call_as_union(args));
-    UnionReduction inter_tile(input_expr_outer, args, uvar_outer, _contents.ptr->name+"_Outer_"+x);
+    // intra tile tail:
+    // no union variables
+    // replace x with xo in args
+    // call intra_tile union at tile boundary
+    for (size_t i=0; i<_contents.ptr->args.size(); i++) {
+        if (_contents.ptr->args[i] == x) {
+            args_tail.push_back(xo);
+            call_args_inner.push_back(Var(xo));
+            call_args_inner.push_back(tile-1);
+        } else {
+            args_tail.push_back(_contents.ptr->args[i]);
+            call_args_inner.push_back(Var(_contents.ptr->args[i]));
+        }
+    }
+    Expr input_expr_tail = substitute(xi, tile-1, intra_union.call_as_union(call_args_inner));
+    UnionReduction intra_tail(input_expr_tail, args_tail, intra_tail_name);
+
+    // union of tails across tiles:
+    // same args as intra tail
+    // rxo as the only union variable
+    // replace xo by rxo in call to intra tail as input expression
+    for (size_t i=0; i<_contents.ptr->args.size(); i++) {
+        if (_contents.ptr->args[i] == x) {
+            args_outer.push_back(xo);
+            call_args_tail.push_back(Var(xo));
+        } else {
+            args_outer.push_back(_contents.ptr->args[i]);
+            call_args_tail.push_back(Var(_contents.ptr->args[i]));
+        }
+    }
+    Expr input_expr_outer = substitute(xo, rxo, intra_tail.call_as_union(call_args_tail));
+    UnionReduction tail_union(input_expr_outer, args_outer, tail_union_name);
+
 
     // uvars of parent transferred to intra tile term, with rxi extra and rx removed
     // transfer all mappings of arg to uvar from parent to sub unions
@@ -300,52 +371,59 @@ UnionReduction& UnionReduction::split(string x, int tile) {
     map<string,string>::iterator e1 = _contents.ptr->arg_to_uvar.end();
     map<string,string>::iterator s2 = _contents.ptr->uvar_to_arg.begin();
     map<string,string>::iterator e2 = _contents.ptr->uvar_to_arg.end();
-    intra_tile._contents.ptr->arg_to_uvar.insert(s1, e1);
-    intra_tile._contents.ptr->uvar_to_arg.insert(s2, e2);
-    intra_tile._contents.ptr->arg_to_uvar.erase(x);
-    intra_tile._contents.ptr->uvar_to_arg.erase(rx.name());
-    intra_tile._contents.ptr->arg_to_uvar.insert(make_pair(xi,rxi.name()));
-    intra_tile._contents.ptr->uvar_to_arg.insert(make_pair(rxi.name(),xi));
+    intra_union._contents.ptr->arg_to_uvar.insert(s1, e1);
+    intra_union._contents.ptr->uvar_to_arg.insert(s2, e2);
+    intra_union._contents.ptr->arg_to_uvar.erase(x);
+    intra_union._contents.ptr->uvar_to_arg.erase(rx.name());
+    intra_union._contents.ptr->arg_to_uvar.insert(make_pair(xi,rxi.name()));
+    intra_union._contents.ptr->uvar_to_arg.insert(make_pair(rxi.name(),xi));
 
     // add mapping xo-rxo and remove x-rx for inter tile
-    inter_tile._contents.ptr->arg_to_uvar.erase(x);
-    inter_tile._contents.ptr->uvar_to_arg.erase(rx.name());
-    inter_tile._contents.ptr->arg_to_uvar.insert(make_pair(xo,rxo.name()));
-    inter_tile._contents.ptr->uvar_to_arg.insert(make_pair(rxo.name(),xo));
+    tail_union._contents.ptr->arg_to_uvar.erase(x);
+    tail_union._contents.ptr->uvar_to_arg.erase(rx.name());
+    tail_union._contents.ptr->arg_to_uvar.insert(make_pair(xo,rxo.name()));
+    tail_union._contents.ptr->uvar_to_arg.insert(make_pair(rxo.name(),xo));
 
     // transfer all bounds from parent union
     // remove bounds of split variable and add those of new vars
-    intra_tile._contents.ptr->lower_bound = _contents.ptr->lower_bound;
-    intra_tile._contents.ptr->lower_bound.insert(make_pair(xi,0));
-    intra_tile._contents.ptr->lower_bound.insert(make_pair(xi,0));
-    inter_tile._contents.ptr->lower_bound.erase(x);
-    inter_tile._contents.ptr->lower_bound.insert(make_pair(xo,0));
-    inter_tile._contents.ptr->lower_bound.insert(make_pair(xo,0));
-    intra_tile._contents.ptr->lower_bound.erase(x);
+    //intra_union._contents.ptr->lower_bound = _contents.ptr->lower_bound;
+    //intra_union._contents.ptr->lower_bound.insert(make_pair(xi,0));
+    //intra_union._contents.ptr->lower_bound.insert(make_pair(xi,0));
+    //tail_union._contents.ptr->lower_bound.erase(x);
+    //tail_union._contents.ptr->lower_bound.insert(make_pair(xo,0));
+    //tail_union._contents.ptr->lower_bound.insert(make_pair(xo,0));
+    //intra_union._contents.ptr->lower_bound.erase(x);
 
-    intra_tile._contents.ptr->upper_bound = _contents.ptr->upper_bound;
-    intra_tile._contents.ptr->upper_bound.insert(make_pair(xi,rxi_extent));
-    intra_tile._contents.ptr->upper_bound.insert(make_pair(xi,rxi_extent));
-    inter_tile._contents.ptr->upper_bound.erase(x);
-    inter_tile._contents.ptr->upper_bound.insert(make_pair(xo,rxo_extent));
-    inter_tile._contents.ptr->upper_bound.insert(make_pair(xo,rxo_extent));
-    intra_tile._contents.ptr->upper_bound.erase(x);
+    //intra_union._contents.ptr->upper_bound = _contents.ptr->upper_bound;
+    //intra_union._contents.ptr->upper_bound.insert(make_pair(xi,rxi_extent));
+    //intra_union._contents.ptr->upper_bound.insert(make_pair(xi,rxi_extent));
+    //tail_union._contents.ptr->upper_bound.erase(x);
+    //tail_union._contents.ptr->upper_bound.insert(make_pair(xo,rxo_extent));
+    //tail_union._contents.ptr->upper_bound.insert(make_pair(xo,rxo_extent));
+    //intra_union._contents.ptr->upper_bound.erase(x);
 
     // replace input expression by combination of split variants
-    // outer term args: replace xo by x/tile-1 and xi by tile-1
-    // inner term args: replace xo by x/tile and xi by x%tile
-    vector<Expr> args_inner(args.size());
-    vector<Expr> args_outer(args.size());
-    for (size_t i=0; i<args.size(); i++) {
-        args_inner[i] = Var(args[i]);
-        args_outer[i] = Var(args[i]);
-        args_outer[i] = substitute(xo, Var(x)/tile-1, args_outer[i]);
-        args_outer[i] = substitute(xi, tile-1,        args_outer[i]);
-        args_inner[i] = substitute(xo, Var(x)/tile, args_inner[i]);
-        args_inner[i] = substitute(xi, Var(x)%tile, args_inner[i]);
+    // outer term args: replace xo by x/tile-1
+    // inner term args: replace x by x/tile, x%tile
+    vector<Expr> arg_expr_inner;
+    vector<Expr> arg_expr_outer;
+    for (size_t i=0; i<_contents.ptr->args.size(); i++) {
+        if (_contents.ptr->args[i] == x) {
+            arg_expr_inner.push_back(Var(x)/tile);
+            arg_expr_inner.push_back(Var(x)%tile);
+            arg_expr_outer.push_back(Var(x)/tile-1);
+        } else {
+            arg_expr_inner.push_back(Var(_contents.ptr->args[i]));
+            arg_expr_outer.push_back(Var(_contents.ptr->args[i]));
+        }
     }
-    _contents.ptr->input = intra_tile.call_as_union(args_inner) +
-        select(Var(x)/tile>0, inter_tile.call_as_union(args_outer), 0);
+    _contents.ptr->input = intra_union.call_as_union(arg_expr_inner) +
+        select(Var(x)/tile>0, tail_union.call_as_union(arg_expr_outer), 0);
+
+    // store the two sub-unions
+    _contents.ptr->sub_unions.push_back(intra_union);
+    _contents.ptr->sub_unions.push_back(intra_tail);
+    _contents.ptr->sub_unions.push_back(tail_union);
 
     // remove all union variables no longer required in input expression
     for (size_t i=0; i<_contents.ptr->uvars.size(); i++) {
@@ -360,10 +438,6 @@ UnionReduction& UnionReduction::split(string x, int tile) {
             i--;
         }
     }
-
-    // store the two sub-unions
-    _contents.ptr->sub_unions.push_back(intra_tile);
-    _contents.ptr->sub_unions.push_back(inter_tile);
 
     // split all the sub-unions needed to compute this union
     for (size_t i=0; i<_contents.ptr->sub_unions.size(); i++) {
@@ -393,40 +467,56 @@ void UnionReduction::convert_to_func() {
     // and all UnionVars with their mapped args
     Expr pure_val = substitute_union_with_func(_contents.ptr->input);
     for (size_t i=0; i<_contents.ptr->uvars.size(); i++) {
-        // each union_variable is mapped to RDom and arg by now
+        // each union_variable is mapped to arg by now
         UnionVar ux = _contents.ptr->uvars[i];
         string    x = _contents.ptr->uvar_to_arg.find(ux.name())->second;
         pure_val = substitute(ux.name(), Var(x), pure_val);
     }
 
     if (_contents.ptr->uvars.empty()) {
-        Function func(_contents.ptr->name+"_func");
+        Function func(_contents.ptr->name);
         func.define(_contents.ptr->args, vec(pure_val));
         _contents.ptr->funcs.push_back(func);
     }
     else {
-        // create RDom for each union variable
-        map<string,RDom> rdom;
-        for (size_t i=0; i<_contents.ptr->uvars.size(); i++) {
-            string n = _contents.ptr->uvars[i].name();
-            string v = _contents.ptr->uvar_to_arg.find(n)->second;
-            Expr b   = simplify(lower_bound(v)+1);
-            Expr e   = simplify(upper_bound(v)-1);
-            rdom[_contents.ptr->uvars[i].name()] = RDom(b,e,n);
-        }
-
         // loop over all union variables, emit one Halide reduction for each
         for (size_t i=0; i<_contents.ptr->uvars.size(); i++) {
             // each union_variable is mapped to RDom and arg by now
             UnionVar ux = _contents.ptr->uvars[i];
             string    x = _contents.ptr->uvar_to_arg.find(ux.name())->second;
-            RDom     rx = rdom.find(ux.name())->second;
 
-            string func_name = _contents.ptr->name+"_func";
+            // find the dimension of the corresponding to union variable
+            int dimension = -1;
+            for (size_t j=0; j<_contents.ptr->args.size(); j++) {
+                if (x == _contents.ptr->args[j])
+                    dimension = j;
+            }
+            if (dimension<0) {
+                cerr << "Argument " << x << " not found in union operation" << endl;
+                assert(false);
+            }
+
+            // Function name
+            string func_name = _contents.ptr->name;
             if (i < _contents.ptr->uvars.size()-1)
-                func_name += "_"+ux.name();
+                func_name += "_" + int_to_string(i);
 
+            // create Function
             Function func(func_name);
+
+            // create RDom
+            string rdom_name = ux.name();
+            rdom_name = erase_all_occurances(rdom_name,".x$r");
+            rdom_name = erase_all_occurances(rdom_name,".y$r");
+            rdom_name = erase_all_occurances(rdom_name,".z$r");
+            //Var  xmin    = Var(func.name()+"."+x+".min."+int_to_string(dimension));
+            //Var  xextent = Var(func.name()+"."+x+".extent."+int_to_string(dimension));
+            Var  xmin    = Var(func.name()+"."+x+".min_realized");
+            Var  xextent = Var(func.name()+"."+x+".extent_realized");
+            Expr rxmin   = simplify(substitute(x, xmin   , ux.min())+1);
+            Expr rxextent= simplify(substitute(x, xextent, ux.extent())-1);
+            RDom rx(rxmin, rxextent, rdom_name);
+
 
             // pure definition
             if (i == 0) {
@@ -493,7 +583,7 @@ vector<Function> UnionReduction::funcs() {
     return func_list;
 }
 
-EXPORT Expr UnionReduction::call_as_func(const vector<Expr>& args) const {
+EXPORT Expr UnionReduction::call_as_func(vector<Expr> args) const {
     if (_contents.ptr->funcs.empty() ||
             !_contents.ptr->funcs[0].has_pure_definition()) {
         cerr << "Union " << _contents.ptr->name << " called as Func before conversion" << endl;
@@ -504,13 +594,12 @@ EXPORT Expr UnionReduction::call_as_func(const vector<Expr>& args) const {
         cerr << "has incorrect number of args" << endl;
         assert(false);
     }
-    // last function in the list represents the complete multi-dimensional
-    // union, each function in list is represents reduction along a perticular
-    // dimension
+    // each function in list is represents reduction along a particular dimension
+    // last function in the list represents the complete multi-dimensional union
     return Call::make(_contents.ptr->funcs[_contents.ptr->funcs.size()-1], args);
 }
 
-Expr UnionReduction::call_as_union(const vector<Expr> &args) const {
+Expr UnionReduction::call_as_union(vector<Expr> args) const {
     if (args.size()!=_contents.ptr->args.size()) {
         cerr << "Call to union " << _contents.ptr->name << " has incorrect number of args" << endl;
         assert(false);
@@ -518,7 +607,7 @@ Expr UnionReduction::call_as_union(const vector<Expr> &args) const {
     return UnionCall::make(*this, args);
 }
 
-Expr UnionReduction::call_as_union(const vector<string> &args) const {
+Expr UnionReduction::call_as_union(vector<string> args) const {
     vector<Expr> var_args(args.size());
     for (size_t i=0; i<var_args.size(); i++)
         var_args[i] = Var(args[i]);

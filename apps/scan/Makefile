@@ -5,6 +5,7 @@ LIB_HALIDE = bin/$(BUILD_PREFIX)/libHalide.a
 else
 LIB_HALIDE = bin/libHalide.a
 endif
+INC_HALIDE = ../../Halide.h
 
 LIBPNG_LIBS_DEFAULT = $(shell libpng-config --ldflags)
 LIBPNG_CXX_FLAGS ?= $(shell libpng-config --cflags)
@@ -27,7 +28,7 @@ endif
 all: scan test
 
 halide_lib:
-	$(MAKE) -C ../../ $(LIB_HALIDE) -j12
+	$(MAKE) -C ../../ -j12
 
 test: halide_lib test.cpp
 	$(CXX) $(CPPFLAGS) test.cpp -I ../../include/ -I ../support ../../$(LIB_HALIDE) -o test  -lpthread -ldl -lncurses $(PNGFLAGS) $(CUDA_LDFLAGS)

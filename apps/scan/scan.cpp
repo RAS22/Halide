@@ -64,8 +64,6 @@ int main() {
 
     Var x("x");
     Var y("y");
-    UnionVar rx(0, x, "rx");
-    UnionVar ry(0, y, "ry");
 
     // -------------------------------------------------------------------------
 
@@ -74,20 +72,16 @@ int main() {
 
     // -------------------------------------------------------------------------
 
-    UnionReduction union_operation(
-            Input(rx, ry),
-            vec(x.name(),y.name()),
-            vec(rx, ry), "U");
-
-    union_operation
-        .bound(x.name(), 0, int(width))
-        .bound(y.name(), 0, int(width));
+    RDom rx(0, x, "rx");
+    RDom ry(0, y, "ry");
+    UnionReduction union_operation(Input(rx,ry), vec(x.name(),y.name()), "U");
 
     // -------------------------------------------------------------------------
 
     std::cout << "\nOriginal Union operation\n" << union_operation << std::endl;
 
-    union_operation.split(x.name(), tile).split(y.name(), tile);
+//    union_operation.split(x.name(), tile);
+//    union_operation.split(y.name(), tile);
     std::cout << "\nAfter spitting along x and y\n" << union_operation << std::endl;
 
     // -------------------------------------------------------------------------
@@ -98,7 +92,7 @@ int main() {
     std::vector<Function> func_list = union_operation.funcs();
     for (size_t i=0; i<func_list.size(); i++) {
         Func f(func_list[i]);
-        if (f.name() == "U_func") {
+        if (f.name() == union_operation.name()) {
             f_main = f;
         }
         std::cout << f << std::endl;
@@ -111,6 +105,27 @@ int main() {
     std::cout << "Realizing" << std::endl;
     f_main.realize(output);
     std::cout << "done" << std::endl;
+
+    // -------------------------------------------------------------------------
+
+    std::cout << "Comparing" << std::endl;
+    for (size_t j=0; j<width; j++) {
+        for (size_t i=0; i<width; i++)
+            std::cout << input(i,j) << "  ";
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
+    for (size_t j=0; j<width; j++) {
+        for (size_t i=0; i<width; i++)
+            std::cout << reference(i,j) << "  ";
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
+    for (size_t j=0; j<width; j++) {
+        for (size_t i=0; i<width; i++)
+            std::cout << output(i,j) << "  ";
+        std::cout << std::endl;
+    }
 
     // -------------------------------------------------------------------------
 

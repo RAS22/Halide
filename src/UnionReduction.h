@@ -22,6 +22,8 @@ struct UnionReductionContents;
 class UnionVar;
 class UnionReduction;
 
+// -----------------------------------------------------------------------------
+
 struct UnionVarContents {
     mutable RefCount ref_count;
     std::string      var;
@@ -29,6 +31,8 @@ struct UnionVarContents {
     Expr             extent;
     ReductionDomain  domain;
 };
+
+// -----------------------------------------------------------------------------
 
 struct UnionReductionContents {
     mutable RefCount                  ref_count;
@@ -45,6 +49,8 @@ struct UnionReductionContents {
     std::map<std::string,std::string> uvar_to_arg;
 };
 
+// -----------------------------------------------------------------------------
+
 class UnionVar {
 private:
     IntrusivePtr<UnionVarContents> _contents;
@@ -53,12 +59,14 @@ public:
     EXPORT UnionVar(const IntrusivePtr<UnionVarContents>&);
     EXPORT UnionVar(Expr m, Expr e);
     EXPORT UnionVar(Expr m, Expr e, std::string n);
-    EXPORT const std::string &name()     const;
-    EXPORT const Expr        &min()      const;
-    EXPORT const Expr        &extent()   const;
-    EXPORT bool same_as(const UnionVar&) const;
+    EXPORT std::string name()            const;
+    EXPORT Expr        min()             const;
+    EXPORT Expr        extent()          const;
+    EXPORT bool        same_as(UnionVar) const;
     EXPORT operator Expr()               const;
 };
+
+// -----------------------------------------------------------------------------
 
 class UnionReduction {
 private:
@@ -69,44 +77,33 @@ private:
 
 public:
     EXPORT UnionReduction();
+    EXPORT UnionReduction(std::string name);
     EXPORT UnionReduction(const IntrusivePtr<UnionReductionContents>&);
-    EXPORT UnionReduction(Expr in,
-            std::vector<std::string> args,
-            std::vector<UnionVar> uvars,
-            std::string name);
+    EXPORT UnionReduction(Expr in, std::vector<std::string> args, std::string name);
 
     // Accessor functions
-    EXPORT const Type                        &type()   const;
-    EXPORT const std::string                 &name()   const;
-    EXPORT const Expr                        &input()  const;
-    EXPORT const std::vector<UnionVar>       &uvars()  const;
-    EXPORT const std::vector<std::string>    &args()   const;
-    EXPORT const std::vector<UnionReduction> &sub_unions() const;
+    EXPORT Type                        type()   const;
+    EXPORT std::string                 name()   const;
+    EXPORT Expr                        value()  const;
+    EXPORT std::vector<UnionVar>       uvars()  const;
+    EXPORT std::vector<std::string>    args()   const;
+    EXPORT std::vector<UnionReduction> sub_unions() const;
 
     // Conversion to Halide Func
     EXPORT std::vector<Function> funcs();
 
     // Bounds
     EXPORT UnionReduction &bound(std::string, Expr, Expr);
-    EXPORT const Expr     &lower_bound(std::string) const;
-    EXPORT const Expr     &upper_bound(std::string) const;
-
-    // // Checking functions
-    // EXPORT bool is_identical (const UnionReduction&) const;
-    // EXPORT bool is_subset    (const UnionReduction&) const;
-    // EXPORT bool is_same_input(const UnionReduction&) const;
-
-    // // Checking read and write complexity
-    // EXPORT int  read_complexity()  const;
-    // EXPORT int  write_complexity() const;
+    EXPORT Expr lower_bound(std::string) const;
+    EXPORT Expr upper_bound(std::string) const;
 
     // Splitting functions
     EXPORT UnionReduction& split(std::string x, int tile);
 
     // Call to the union operation
-    EXPORT Expr call_as_func (const std::vector<Expr>&) const;
-    EXPORT Expr call_as_union(const std::vector<Expr>&) const;
-    EXPORT Expr call_as_union(const std::vector<std::string>&) const;
+    EXPORT Expr call_as_func (std::vector<Expr>) const;
+    EXPORT Expr call_as_union(std::vector<Expr>) const;
+    EXPORT Expr call_as_union(std::vector<std::string>) const;
 
     EXPORT std::ostream &print(std::ostream&) const;
 };

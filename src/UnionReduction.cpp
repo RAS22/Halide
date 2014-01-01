@@ -303,6 +303,7 @@ UnionReduction& UnionReduction::split(string x, int tile) {
     // outer terms computes over all tiles
     //UnionVar rxi(substitute(x,xi,rx.min()), substitute(x,xi,rx.extent()), rx.name()+"_i");
     UnionVar rxi(simplify(substitute(x,xi,rx.min())), Var(xi), rx.name()+"_i");
+    UnionVar rxt(simplify(substitute(x,xi,rx.min())), tile, rx.name()+"_i");
     UnionVar rxo(0, Var(xo), rx.name()+"_o");
 
     // names of union operations to be generated
@@ -331,20 +332,16 @@ UnionReduction& UnionReduction::split(string x, int tile) {
     UnionReduction intra_union(input_expr_inner, args_inner, intra_union_name);
 
     // intra tile tail:
-    // no union variables
-    // replace x with xo in args
-    // call intra_tile union at tile boundary
+    // replace rx by t.xo+rxi in expression
+    // replace x by xo in args
     for (size_t i=0; i<_contents.ptr->args.size(); i++) {
         if (_contents.ptr->args[i] == x) {
             args_tail.push_back(xo);
-            call_args_inner.push_back(Var(xo));
-            call_args_inner.push_back(tile-1);
         } else {
             args_tail.push_back(_contents.ptr->args[i]);
-            call_args_inner.push_back(Var(_contents.ptr->args[i]));
         }
     }
-    Expr input_expr_tail = substitute(xi, tile-1, intra_union.call_as_union(call_args_inner));
+    Expr input_expr_tail = substitute(rx.name(), Var(xo)*tile + rxt, _contents.ptr->input);
     UnionReduction intra_tail(input_expr_tail, args_tail, intra_tail_name);
 
     // union of tails across tiles:
@@ -378,6 +375,16 @@ UnionReduction& UnionReduction::split(string x, int tile) {
     intra_union._contents.ptr->arg_to_uvar.insert(make_pair(xi,rxi.name()));
     intra_union._contents.ptr->uvar_to_arg.insert(make_pair(rxi.name(),xi));
 
+    // uvars of parent transferred to intra tile term, with rxt extra and rx removed
+    // transfer all mappings of arg to uvar from parent to sub unions
+    // add mapping xi-rxt and remove x-rx for intra tile
+    intra_tail._contents.ptr->arg_to_uvar.insert(s1, e1);
+    intra_tail._contents.ptr->uvar_to_arg.insert(s2, e2);
+    intra_tail._contents.ptr->arg_to_uvar.erase(x);
+    intra_tail._contents.ptr->uvar_to_arg.erase(rx.name());
+    intra_tail._contents.ptr->arg_to_uvar.insert(make_pair(xi,rxt.name()));
+    intra_tail._contents.ptr->uvar_to_arg.insert(make_pair(rxt.name(),xi));
+
     // add mapping xo-rxo and remove x-rx for inter tile
     tail_union._contents.ptr->arg_to_uvar.erase(x);
     tail_union._contents.ptr->uvar_to_arg.erase(rx.name());
@@ -386,21 +393,18 @@ UnionReduction& UnionReduction::split(string x, int tile) {
 
     // transfer all bounds from parent union
     // remove bounds of split variable and add those of new vars
+    // no bounds required for the intra tile tail
     //intra_union._contents.ptr->lower_bound = _contents.ptr->lower_bound;
-    //intra_union._contents.ptr->lower_bound.insert(make_pair(xi,0));
-    //intra_union._contents.ptr->lower_bound.insert(make_pair(xi,0));
-    //tail_union._contents.ptr->lower_bound.erase(x);
-    //tail_union._contents.ptr->lower_bound.insert(make_pair(xo,0));
-    //tail_union._contents.ptr->lower_bound.insert(make_pair(xo,0));
     //intra_union._contents.ptr->lower_bound.erase(x);
+    //intra_union._contents.ptr->lower_bound.insert(make_pair(xi,0));
+    //tail_union ._contents.ptr->lower_bound.erase(x);
+    //tail_union ._contents.ptr->lower_bound.insert(make_pair(xo,0));
 
     //intra_union._contents.ptr->upper_bound = _contents.ptr->upper_bound;
-    //intra_union._contents.ptr->upper_bound.insert(make_pair(xi,rxi_extent));
-    //intra_union._contents.ptr->upper_bound.insert(make_pair(xi,rxi_extent));
-    //tail_union._contents.ptr->upper_bound.erase(x);
-    //tail_union._contents.ptr->upper_bound.insert(make_pair(xo,rxo_extent));
-    //tail_union._contents.ptr->upper_bound.insert(make_pair(xo,rxo_extent));
     //intra_union._contents.ptr->upper_bound.erase(x);
+    //intra_union._contents.ptr->upper_bound.insert(make_pair(xi,rxi_extent));
+    //tail_union ._contents.ptr->upper_bound.erase(x);
+    //tail_union ._contents.ptr->upper_bound.insert(make_pair(xo,rxo_extent));
 
     // replace input expression by combination of split variants
     // outer term args: replace xo by x/tile-1

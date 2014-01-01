@@ -80,8 +80,8 @@ int main() {
 
     std::cout << "\nOriginal Union operation\n" << union_operation << std::endl;
 
-//    union_operation.split(x.name(), tile);
-//    union_operation.split(y.name(), tile);
+    union_operation.split(x.name(), tile);
+    union_operation.split(y.name(), tile);
     std::cout << "\nAfter spitting along x and y\n" << union_operation << std::endl;
 
     // -------------------------------------------------------------------------
@@ -103,7 +103,7 @@ int main() {
     std::cout << "Compiling JIT" << std::endl;
     f_main.compile_jit();
     std::cout << "Realizing" << std::endl;
-    f_main.realize(output);
+//    f_main.realize(output);
     std::cout << "done" << std::endl;
 
     // -------------------------------------------------------------------------

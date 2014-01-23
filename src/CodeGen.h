@@ -93,6 +93,8 @@ public:
      * module cleanup routines. */
     virtual void jit_finalize(llvm::ExecutionEngine *, llvm::Module *, std::vector<void (*)()> *) {}
 
+    static void initialize_llvm();
+
 protected:
 
     /** State needed by llvm for code generation, including the
@@ -133,10 +135,11 @@ protected:
     /** Fetch an entry from the symbol table. If the symbol is not
      * found, it either errors out (if the second arg is true), or
      * returns NULL. */
-    llvm::Value* sym_get(const std::string &name, bool must_succeed = true);
+    llvm::Value* sym_get(const std::string &name,
+                         bool must_succeed = true) const;
 
     /** Test if an item exists in the symbol table. */
-    bool sym_exists(const std::string &name);
+    bool sym_exists(const std::string &name) const;
 
     /** Some useful llvm types */
     // @{
@@ -287,22 +290,16 @@ protected:
      * current context. */
     llvm::Type *llvm_type_of(Type);
 
-    /** Restores the stack pointer to the given value. Call this to
-     * free a stack variable. */
-    void restore_stack(llvm::Value *saved_stack);
-
-    /** Save the stack directly. You only need to call this if you're
-     * doing your own allocas. */
-    llvm::Value *save_stack();
-
-    /** If you're doing an Alloca but can't clean it up right now, set
-     * this to high and it will get cleaned up at the close of the
-     * next For loop. */
-    bool need_stack_restore;
+    /** Perform an alloca at the function entrypoint. Will be cleaned
+     * on function exit. */
+    llvm::Value *create_alloca_at_entry(llvm::Type *type, int n, const std::string &name = "");
 
     /** Which buffers came in from the outside world (and so we can't
      * guarantee their alignment) */
     std::set<std::string> might_be_misaligned;
+
+    llvm::Value *get_user_context() const;
+
 
 
 private:

@@ -350,27 +350,35 @@ void CodeGen_ARM::compile(Stmt stmt, string name,
 
     // Fix the target triple.
     if (target.bits == 64) {
-        #if !(WITH_ARM64)
+
+    }
+
+    debug(1) << "Target triple of initial module: " << module->getTargetTriple() << "\n";
+    llvm::Triple triple;
+    if (target.bits == 32) {
+        triple.setArch(llvm::Triple::arm);
+    } else {
+        assert(target.bits == 64);
+        #if (WITH_ARM64)
+        triple.setArch(llvm::Triple::aarch64);
+        #else
         assert(false && "AArch64 llvm target not enabled in this build of Halide");
         #endif
         std::cerr << "WARNING: 64-bit arm builds are completely untested\n";
     }
 
-    debug(1) << "Target triple of initial module: " << module->getTargetTriple() << "\n";
     if (target.os == Target::Android) {
         assert(target.bits == 32 && "Not sure what llvm target triple to use for 64-bit arm android");
-        module->setTargetTriple("arm-linux-eabi");
+        triple.setOS(llvm::Triple::Linux);
+        triple.setEnvironment(llvm::Triple::EABI);
     } else if (target.os == Target::IOS) {
-        // armv7 is 32-bit
-        if (target.bits == 32) {
-            module->setTargetTriple("armv7-apple-ios");
-        } else {
-            module->setTargetTriple("aarch64-apple-ios");
-        }
+        triple.setOS(llvm::Triple::IOS);
+        triple.setVendor(llvm::Triple::Apple);
     } else if (target.os == Target::NaCl) {
         assert(target.bits == 32 && "Not sure what llvm target triple to use for 64-bit arm nacl");
-        module->setTargetTriple("arm-unknown-nacl-eabi");
         #if WITH_NATIVE_CLIENT
+        triple.setOS(llvm::Triple::NaCl);
+        triple.setEnvironment(llvm::Triple::EABI);
         // The ARM Nacl backend relies on global switches being set to do
         // the sandboxing, so set them here.
         llvm::FlagSfiData = true;
@@ -381,16 +389,16 @@ void CodeGen_ARM::compile(Stmt stmt, string name,
         llvm::FlagSfiDisableCP = true;
         llvm::FlagSfiZeroMask = false;
         ReserveR9 = true;
+        #else
+        assert(false && "This version of Halide was compiled without nacl support");
         #endif
     } else if (target.os == Target::Linux) {
-        if (target.bits == 32) {
-            module->setTargetTriple("arm-linux-gnueabihf");
-        } else {
-            module->setTargetTriple("aarch64-linux-gnueabihf");
-        }
+        triple.setOS(llvm::Triple::Linux);
+        triple.setEnvironment(llvm::Triple::GNUEABIHF);
     } else {
         assert(false && "No arm support for this OS");
     }
+    module->setTargetTriple(triple.str());
     debug(1) << "Target triple of initial module: " << module->getTargetTriple() << "\n";
 
     // Pass to the generic codegen
@@ -621,15 +629,15 @@ void CodeGen_ARM::visit(const Div *op) {
 
         int64_t multiplier, shift;
         if (op->type.bits == 32) {
-            multiplier = IntegerDivision::table_s32[const_divisor-2][1];
-            shift      = IntegerDivision::table_s32[const_divisor-2][2];
+            multiplier = IntegerDivision::table_s32[const_divisor][2];
+            shift      = IntegerDivision::table_s32[const_divisor][3];
         } else if (op->type.bits == 16) {
-            multiplier = IntegerDivision::table_s16[const_divisor-2][1];
-            shift      = IntegerDivision::table_s16[const_divisor-2][2];
+            multiplier = IntegerDivision::table_s16[const_divisor][2];
+            shift      = IntegerDivision::table_s16[const_divisor][3];
         } else {
             // 8 bit
-            multiplier = IntegerDivision::table_s8[const_divisor-2][1];
-            shift      = IntegerDivision::table_s8[const_divisor-2][2];
+            multiplier = IntegerDivision::table_s8[const_divisor][2];
+            shift      = IntegerDivision::table_s8[const_divisor][3];
         }
 
         Value *val = codegen(op->a);
@@ -671,17 +679,17 @@ void CodeGen_ARM::visit(const Div *op) {
 
         int64_t method, multiplier, shift;
         if (op->type.bits == 32) {
-            method     = IntegerDivision::table_u32[const_divisor-2][0];
-            multiplier = IntegerDivision::table_u32[const_divisor-2][1];
-            shift      = IntegerDivision::table_u32[const_divisor-2][2];
+            method     = IntegerDivision::table_u32[const_divisor][1];
+            multiplier = IntegerDivision::table_u32[const_divisor][2];
+            shift      = IntegerDivision::table_u32[const_divisor][3];
         } else if (op->type.bits == 16) {
-            method     = IntegerDivision::table_u16[const_divisor-2][0];
-            multiplier = IntegerDivision::table_u16[const_divisor-2][1];
-            shift      = IntegerDivision::table_u16[const_divisor-2][2];
+            method     = IntegerDivision::table_u16[const_divisor][1];
+            multiplier = IntegerDivision::table_u16[const_divisor][2];
+            shift      = IntegerDivision::table_u16[const_divisor][3];
         } else {
-            method     = IntegerDivision::table_u8[const_divisor-2][0];
-            multiplier = IntegerDivision::table_u8[const_divisor-2][1];
-            shift      = IntegerDivision::table_u8[const_divisor-2][2];
+            method     = IntegerDivision::table_u8[const_divisor][1];
+            multiplier = IntegerDivision::table_u8[const_divisor][2];
+            shift      = IntegerDivision::table_u8[const_divisor][3];
         }
 
         assert(method != 0 &&
@@ -1107,23 +1115,25 @@ void CodeGen_ARM::visit(const Store *op) {
         return;
     }
 
-    // We have builtins for strided stores with fixed but unknown stride
-    ostringstream builtin;
-    builtin << "strided_store_"
-            << (op->value.type().is_float() ? 'f' : 'i')
-            << op->value.type().bits
-            << 'x' << op->value.type().width;
+    // We have builtins for strided stores with fixed but unknown stride, but they use inline assembly
+    if (target.os != Target::NaCl) {
+        ostringstream builtin;
+        builtin << "strided_store_"
+                << (op->value.type().is_float() ? 'f' : 'i')
+                << op->value.type().bits
+                << 'x' << op->value.type().width;
 
-    llvm::Function *fn = module->getFunction(builtin.str());
-    if (fn) {
-        Value *base = codegen_buffer_pointer(op->name, op->value.type().element_of(), ramp->base);
-        Value *stride = codegen(ramp->stride * op->value.type().bytes());
-        Value *val = codegen(op->value);
-        debug(4) << "Creating call to " << builtin.str() << "\n";
-        Instruction *store = builder->CreateCall(fn, vec(base, stride, val));
-        (void)store;
-        add_tbaa_metadata(store, op->name);
-        return;
+        llvm::Function *fn = module->getFunction(builtin.str());
+        if (fn) {
+            Value *base = codegen_buffer_pointer(op->name, op->value.type().element_of(), ramp->base);
+            Value *stride = codegen(ramp->stride * op->value.type().bytes());
+            Value *val = codegen(op->value);
+            debug(4) << "Creating call to " << builtin.str() << "\n";
+            Instruction *store = builder->CreateCall(fn, vec(base, stride, val));
+            (void)store;
+            add_tbaa_metadata(store, op->name);
+            return;
+        }
     }
 
     CodeGen::visit(op);
@@ -1214,22 +1224,24 @@ void CodeGen_ARM::visit(const Load *op) {
         }
     }
 
-    // We have builtins for strided loads with fixed but unknown stride
-    ostringstream builtin;
-    builtin << "strided_load_"
-            << (op->type.is_float() ? 'f' : 'i')
-            << op->type.bits
-            << 'x' << op->type.width;
+    // We have builtins for strided loads with fixed but unknown stride, but they use inline assembly.
+    if (target.os != Target::NaCl) {
+        ostringstream builtin;
+        builtin << "strided_load_"
+                << (op->type.is_float() ? 'f' : 'i')
+                << op->type.bits
+                << 'x' << op->type.width;
 
-    llvm::Function *fn = module->getFunction(builtin.str());
-    if (fn) {
-        Value *base = codegen_buffer_pointer(op->name, op->type.element_of(), ramp->base);
-        Value *stride = codegen(ramp->stride * op->type.bytes());
-        debug(4) << "Creating call to " << builtin.str() << "\n";
-        Instruction *load = builder->CreateCall(fn, vec(base, stride), builtin.str());
-        add_tbaa_metadata(load, op->name);
-        value = load;
-        return;
+        llvm::Function *fn = module->getFunction(builtin.str());
+        if (fn) {
+            Value *base = codegen_buffer_pointer(op->name, op->type.element_of(), ramp->base);
+            Value *stride = codegen(ramp->stride * op->type.bytes());
+            debug(4) << "Creating call to " << builtin.str() << "\n";
+            Instruction *load = builder->CreateCall(fn, vec(base, stride), builtin.str());
+            add_tbaa_metadata(load, op->name);
+            value = load;
+            return;
+        }
     }
 
     CodeGen::visit(op);

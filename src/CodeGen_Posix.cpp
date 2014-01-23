@@ -134,7 +134,9 @@ CodeGen_Posix::Allocation CodeGen_Posix::create_allocation(const std::string &na
     Allocation allocation;
 
     if (const IntImm *int_size = size.as<IntImm>()) {
-        allocation.stack_size = int_size->value * type.bytes();
+        int stack_elems = int_size->value;
+
+        allocation.stack_size = stack_elems * type.bytes();
 
         // Round up to nearest multiple of 32.
         allocation.stack_size = ((allocation.stack_size + 31)/32)*32;
@@ -150,23 +152,14 @@ CodeGen_Posix::Allocation CodeGen_Posix::create_allocation(const std::string &na
     llvm::Type *llvm_type = llvm_type_of(type);
 
     if (allocation.stack_size) {
-        // Do a new 32-byte aligned alloca at the function entry block
-        allocation.saved_stack = NULL; //save_stack();
 
         // We used to do the alloca locally and save and restore the
         // stack pointer, but this makes llvm generate streams of
         // spill/reloads.
-
-        llvm::BasicBlock *here = builder->GetInsertBlock();
-        builder->SetInsertPoint(here->getParent()->getEntryBlock().getFirstNonPHI());
-        Value *size = ConstantInt::get(i32, allocation.stack_size/32);
-        Value *ptr = builder->CreateAlloca(i32x8, size, name);
+        Value *ptr = create_alloca_at_entry(i32x8, allocation.stack_size/32, name);
         allocation.ptr = builder->CreatePointerCast(ptr, llvm_type->getPointerTo());
 
-        builder->SetInsertPoint(here);
-
     } else {
-        allocation.saved_stack = NULL;
         Value *llvm_size = codegen(size * type.bytes());
 
         // call malloc
@@ -174,10 +167,14 @@ CodeGen_Posix::Allocation CodeGen_Posix::create_allocation(const std::string &na
         malloc_fn->setDoesNotAlias(0);
         assert(malloc_fn && "Could not find halide_malloc in module");
 
-        llvm_size = builder->CreateIntCast(llvm_size, malloc_fn->arg_begin()->getType(), false);
+        llvm::Function::arg_iterator arg_iter = malloc_fn->arg_begin();
+        ++arg_iter;  // skip the user context *
+        llvm_size = builder->CreateIntCast(llvm_size, arg_iter->getType(), false);
 
         debug(4) << "Creating call to halide_malloc\n";
-        CallInst *call = builder->CreateCall(malloc_fn, llvm_size);
+        Value *args[2] = { get_user_context(), llvm_size };
+
+        CallInst *call = builder->CreateCall(malloc_fn, args);
         allocation.ptr = call;
 
         // Assert that the allocation worked.
@@ -209,22 +206,24 @@ void CodeGen_Posix::free_allocation(const std::string &name) {
         llvm::Function *free_fn = module->getFunction("halide_free");
         assert(free_fn && "Could not find halide_free in module");
         debug(4) << "Creating call to halide_free\n";
-        builder->CreateCall(free_fn, alloc.ptr);
+        Value *args[2] = { get_user_context(), alloc.ptr };
+        builder->CreateCall(free_fn, args);
     }
 
     allocations.pop(name);
 }
 
 void CodeGen_Posix::destroy_allocation(Allocation alloc) {
-
-    if (alloc.saved_stack) {
-        restore_stack(alloc.saved_stack);
-    }
-
     // Heap allocations have already been freed.
 }
 
 void CodeGen_Posix::visit(const Allocate *alloc) {
+
+    if (sym_exists(alloc->name + ".host")) {
+        std::cerr << "Can't have two different buffers with the same name: "
+                  << alloc->name << "\n";
+        assert(false);
+    }
 
     Allocation allocation = create_allocation(alloc->name, alloc->type, alloc->size);
     sym_push(alloc->name + ".host", allocation.ptr);

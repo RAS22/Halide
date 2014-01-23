@@ -25,19 +25,16 @@ static void cpuid(int info[4], int infoType, int extra) {
 
 #ifdef _LP64
 static void cpuid(int info[4], int infoType, int extra) {
-    // We save %ebx in case it's the PIC register
     __asm__ __volatile__ (
         "cpuid                 \n\t"
-        "xchg{l}\t{%%}ebx, %1  \n\t"
-        : "=a" (info[0]), "=r" (info[1]), "=c" (info[2]), "=d" (info[3])
-        : "0" (infoType), "2" (extra)
-        : "%rbx");
+        : "=a" (info[0]), "=b" (info[1]), "=c" (info[2]), "=d" (info[3])
+        : "0" (infoType), "2" (extra));
 }
 #else
 static void cpuid(int info[4], int infoType, int extra) {
     // We save %ebx in case it's the PIC register
     __asm__ __volatile__ (
-        "xchg{l}\t{%%}ebx, %1  \n\t"
+        "mov{l}\t{%%}ebx, %1  \n\t"
         "cpuid                 \n\t"
         "xchg{l}\t{%%}ebx, %1  \n\t"
         : "=a" (info[0]), "=r" (info[1]), "=c" (info[2]), "=d" (info[3])
@@ -99,32 +96,56 @@ Target get_host_target() {
 #endif
 }
 
-Target get_target_from_environment() {
+namespace {
+string get_env(const char *name) {
+#ifdef _WIN32
+    char buf[128];
+    size_t read = 0;
+    getenv_s(&read, buf, name);
+    if (read) {
+        return string(buf);
+    } else {
+        return "";
+    }
+#else
+    char *buf = getenv(name);
+    if (buf) {
+        return string(buf);
+    } else {
+        return "";
+    }
+#endif
+}
+}
 
+Target get_target_from_environment() {
+    string target = get_env("HL_TARGET");
+    if (target.empty()) {
+        return get_host_target();
+    } else {
+        return parse_target_string(target);
+    }
+}
+
+Target get_jit_target_from_environment() {
+    Target host = get_host_target();
+    string target = get_env("HL_JIT_TARGET");
+    if (target.empty()) {
+        return host;
+    } else {
+        Target t = parse_target_string(target);
+        assert(t.os == host.os && t.arch == host.arch && t.bits == host.bits &&
+               "HL_JIT_TARGET must match the host OS, architecture, and bit width");
+        return t;
+    }
+}
+
+Target parse_target_string(const std::string &target) {
     //Internal::debug(0) << "Getting host target \n";
 
     Target t = get_host_target();
 
     //Internal::debug(0) << "Got host target \n";
-
-    string target;
-#ifdef _WIN32
-    char buf[128];
-    size_t read = 0;
-    getenv_s(&read, buf, "HL_TARGET");
-    if (read) {
-        target = buf;
-    } else {
-        return t;
-    }
-#else
-    char *buf = getenv("HL_TARGET");
-    if (buf) {
-        target = buf;
-    } else {
-        return t;
-    }
-#endif
 
     if (target.empty()) return t;
 
@@ -243,6 +264,16 @@ Target get_target_from_environment() {
     return t;
 }
 
+namespace {
+llvm::Module *parse_bitcode_file(llvm::MemoryBuffer *bitcode_buffer, llvm::LLVMContext *context) {
+    #if LLVM_VERSION < 35
+    return llvm::ParseBitcodeFile(bitcode_buffer, *context);
+    #else
+    return llvm::parseBitcodeFile(bitcode_buffer, *context).get();
+    #endif
+}
+}
+
 #define DECLARE_INITMOD(mod)                                            \
     extern "C" unsigned char halide_internal_initmod_##mod[];           \
     extern "C" int halide_internal_initmod_##mod##_length;              \
@@ -250,7 +281,7 @@ Target get_target_from_environment() {
         llvm::StringRef sb = llvm::StringRef((const char *)halide_internal_initmod_##mod, \
                                              halide_internal_initmod_##mod##_length); \
         llvm::MemoryBuffer *bitcode_buffer = llvm::MemoryBuffer::getMemBuffer(sb); \
-        llvm::Module *module = llvm::ParseBitcodeFile(bitcode_buffer, *context); \
+        llvm::Module *module = parse_bitcode_file(bitcode_buffer, context); \
         delete bitcode_buffer;                                          \
         return module;                                                  \
     }
@@ -310,6 +341,7 @@ DECLARE_LL_INITMOD(ptx_compute_35)
 #endif
 DECLARE_LL_INITMOD(spir_dev)
 DECLARE_LL_INITMOD(spir64_dev)
+DECLARE_LL_INITMOD(spir_common_dev)
 DECLARE_LL_INITMOD(x86_avx)
 DECLARE_LL_INITMOD(x86)
 DECLARE_LL_INITMOD(x86_sse41)
@@ -490,12 +522,12 @@ llvm::Module *get_initial_module_for_ptx_device(llvm::LLVMContext *c) {
         // to "available externally" which should guarantee they do not exist
         // after the resulting module is finalized to code. That is they must
         // be inlined to be used.
-	//
-	// However libdevice has a few routines that are marked
-	// "noinline" which must either be changed to alow inlining or
-	// preserved in generated code. This preserves the intent of
-	// keeping these routines out-of-line and hence called by
-	// not marking them AvailableExternally.
+        //
+        // However libdevice has a few routines that are marked
+        // "noinline" which must either be changed to alow inlining or
+        // preserved in generated code. This preserves the intent of
+        // keeping these routines out-of-line and hence called by
+        // not marking them AvailableExternally.
 
         if (!f->isDeclaration() && !f->hasFnAttribute(llvm::Attribute::NoInline)) {
             f->setLinkage(llvm::GlobalValue::AvailableExternallyLinkage);
@@ -508,10 +540,15 @@ llvm::Module *get_initial_module_for_ptx_device(llvm::LLVMContext *c) {
 
 llvm::Module *get_initial_module_for_spir_device(llvm::LLVMContext *c, int bits) {
     assert(bits == 32 || bits == 64);
+
+    vector<llvm::Module *> modules;
     if (bits == 32)
-        return get_initmod_spir_dev_ll(c);
+        modules.push_back(get_initmod_spir_dev_ll(c));
     else
-        return get_initmod_spir64_dev_ll(c);
+        modules.push_back(get_initmod_spir64_dev_ll(c));
+    modules.push_back(get_initmod_spir_common_dev_ll(c));
+    link_modules(modules);
+    return modules[0];
 }
 
 }

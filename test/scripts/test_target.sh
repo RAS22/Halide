@@ -1,6 +1,7 @@
 LLVM=$1
 
 export HL_TARGET=$2
+export HL_JIT_TARGET=$2
 
 if [[ "$HL_TARGET" == x86-3* ]]; then
     BITS=32
@@ -45,6 +46,10 @@ mv distrib/halide.tgz distrib/halide_${HOST}_${BITS}_${LLVM}_${COMMIT}_${DATE}.t
 chmod a+r distrib/*
 if [[ "$HL_TARGET" == *nacl ]]; then
     # The tests don't work for nacl yet. It's still worth testing that everything builds.
+
+    # Also check that the HelloNacl test compiles.
+    # (Disabled until we switch it to newlib)
+    # make -C apps/HelloNaCl &&
     echo "Halide builds but tests not run."
 else
     make test_correctness -j8 &&

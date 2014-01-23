@@ -16,6 +16,7 @@
 #include "JITCompiledModule.h"
 #include "Image.h"
 #include "Util.h"
+#include "Target.h"
 #include "Tuple.h"
 
 namespace Halide {
@@ -26,6 +27,23 @@ namespace Halide {
  * until we see how this object gets used.
  */
 class FuncRefExpr;
+
+/** A class that can represent Vars or RVars. Used for reorder calls
+ * which can accept a mix of either. */
+struct VarOrRVar {
+    VarOrRVar(const Var &v) : var(v), is_rvar(false) {}
+    VarOrRVar(const RVar &r) : rvar(r), is_rvar(true) {}
+    VarOrRVar(const RDom &r) : rvar(RVar(r)), is_rvar(true) {}
+
+    const std::string &name() const {
+        if (is_rvar) return rvar.name();
+        else return var.name();
+    }
+
+    const Var var;
+    const RVar rvar;
+    const bool is_rvar;
+};
 
 class FuncRefVar {
     Internal::Function func;
@@ -187,19 +205,30 @@ public:
     EXPORT ScheduleHandle &unroll(Var var);
     EXPORT ScheduleHandle &vectorize(Var var, int factor);
     EXPORT ScheduleHandle &unroll(Var var, int factor);
-    EXPORT ScheduleHandle &bound(Var var, Expr min, Expr extent);
     EXPORT ScheduleHandle &tile(Var x, Var y, Var xo, Var yo, Var xi, Var yi, Expr xfactor, Expr yfactor);
     EXPORT ScheduleHandle &tile(Var x, Var y, Var xi, Var yi, Expr xfactor, Expr yfactor);
-    EXPORT ScheduleHandle &reorder(const std::vector<Var> &vars);
-    EXPORT ScheduleHandle &reorder(Var x, Var y);
-    EXPORT ScheduleHandle &reorder(Var x, Var y, Var z);
-    EXPORT ScheduleHandle &reorder(Var x, Var y, Var z, Var w);
-    EXPORT ScheduleHandle &reorder(Var x, Var y, Var z, Var w, Var t);
-    EXPORT ScheduleHandle &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2);
-    EXPORT ScheduleHandle &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3);
-    EXPORT ScheduleHandle &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4);
-    EXPORT ScheduleHandle &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4, Var t5);
-    EXPORT ScheduleHandle &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4, Var t5, Var t6);
+    EXPORT ScheduleHandle &reorder(const std::vector<VarOrRVar> &vars);
+    EXPORT ScheduleHandle &reorder(VarOrRVar x, VarOrRVar y);
+    EXPORT ScheduleHandle &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z);
+    EXPORT ScheduleHandle &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                                   VarOrRVar w);
+    EXPORT ScheduleHandle &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                                   VarOrRVar w, VarOrRVar t);
+    EXPORT ScheduleHandle &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                                   VarOrRVar w, VarOrRVar t1, VarOrRVar t2);
+    EXPORT ScheduleHandle &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                                   VarOrRVar w, VarOrRVar t1, VarOrRVar t2,
+                                   VarOrRVar t3);
+    EXPORT ScheduleHandle &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                                   VarOrRVar w, VarOrRVar t1, VarOrRVar t2,
+                                   VarOrRVar t3, VarOrRVar t4);
+    EXPORT ScheduleHandle &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                                   VarOrRVar w, VarOrRVar t1, VarOrRVar t2,
+                                   VarOrRVar t3, VarOrRVar t4, VarOrRVar t5);
+    EXPORT ScheduleHandle &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                                   VarOrRVar w, VarOrRVar t1, VarOrRVar t2,
+                                   VarOrRVar t3, VarOrRVar t4, VarOrRVar t5,
+                                   VarOrRVar t6);
     EXPORT ScheduleHandle &rename(Var old_name, Var new_name);
 
     EXPORT ScheduleHandle &cuda_threads(Var thread_x);
@@ -253,25 +282,31 @@ class Func {
 
     /** The current error handler used for realizing this
      * function. May be NULL. Only relevant when jitting. */
-    void (*error_handler)(const char *);
+    void (*error_handler)(void *user_context, const char *);
 
     /** The current custom allocator used for realizing this
      * function. May be NULL. Only relevant when jitting. */
     // @{
-    void *(*custom_malloc)(size_t);
-    void (*custom_free)(void *);
+    void *(*custom_malloc)(void *user_context, size_t);
+    void (*custom_free)(void *user_context, void *ptr);
     // @}
 
     /** The current custom parallel task launcher and handler for
      * realizing this function. May be NULL. */
     // @{
-    int (*custom_do_par_for)(int (*)(int, uint8_t *), int, int, uint8_t *);
-    int (*custom_do_task)(int (*)(int, uint8_t *), int, uint8_t *);
+    int (*custom_do_par_for)(void *user_context,
+                             int (*)(void *, int, uint8_t *),
+                             int, int, uint8_t *);
+    int (*custom_do_task)(void *user_context, int (*)(void *, int, uint8_t *),
+                          int, uint8_t *);
     // @}
 
     /** The current custom tracing function. May be NULL. */
     // @{
-    void (*custom_trace)(const char *, int32_t, int32_t, int32_t, int32_t, int32_t, const void *, int32_t, const int32_t *);
+    int32_t (*custom_trace)(void *, const char *, int32_t,
+                            int32_t, int32_t, int32_t,
+                            int32_t, int32_t, const void *,
+                            int32_t, const int32_t *);
     // @}
 
     /** Pointers to current values of the automatically inferred
@@ -337,7 +372,17 @@ public:
      \endcode
      *
      */
-    EXPORT Realization realize(int x_size = 0, int y_size = 0, int z_size = 0, int w_size = 0);
+    // @{
+    EXPORT Realization realize(std::vector<int32_t> sizes, const Target &target = get_jit_target_from_environment());
+    EXPORT Realization realize(int x_size, int y_size, int z_size, int w_size,
+                               const Target &target = get_jit_target_from_environment());
+    EXPORT Realization realize(int x_size, int y_size, int z_size,
+                               const Target &target = get_jit_target_from_environment());
+    EXPORT Realization realize(int x_size, int y_size,
+                               const Target &target = get_jit_target_from_environment());
+    EXPORT Realization realize(int x_size = 0,
+                               const Target &target = get_jit_target_from_environment());
+    // @}
 
     /** Evaluate this function into an existing allocated buffer or
      * buffers. If the buffer is also one of the arguments to the
@@ -345,8 +390,8 @@ public:
      * necessarily safe to run in-place. If you pass multiple buffers,
      * they must have matching sizes. */
     // @{
-    EXPORT void realize(Realization dst);
-    EXPORT void realize(Buffer dst);
+    EXPORT void realize(Realization dst, const Target &target = get_jit_target_from_environment());
+    EXPORT void realize(Buffer dst, const Target &target = get_jit_target_from_environment());
     // @}
 
     /** For a given size of output, or a given output buffer,
@@ -364,14 +409,24 @@ public:
      * given filename (which should probably end in .bc), type
      * signature, and C function name (which defaults to the same name
      * as this halide function */
-    EXPORT void compile_to_bitcode(const std::string &filename, std::vector<Argument>, const std::string &fn_name = "");
+    //@{
+    EXPORT void compile_to_bitcode(const std::string &filename, std::vector<Argument>, const std::string &fn_name,
+                                   const Target &target = get_target_from_environment());
+    EXPORT void compile_to_bitcode(const std::string &filename, std::vector<Argument>,
+                                   const Target &target = get_target_from_environment());
+    // @}
 
     /** Statically compile this function to an object file, with the
      * given filename (which should probably end in .o or .obj), type
      * signature, and C function name (which defaults to the same name
      * as this halide function. You probably don't want to use this
      * directly; call compile_to_file instead. */
-    EXPORT void compile_to_object(const std::string &filename, std::vector<Argument>, const std::string &fn_name = "");
+    //@{
+    EXPORT void compile_to_object(const std::string &filename, std::vector<Argument>, const std::string &fn_name,
+                                  const Target &target = get_target_from_environment());
+    EXPORT void compile_to_object(const std::string &filename, std::vector<Argument>,
+                                  const Target &target = get_target_from_environment());
+    // @}
 
     /** Emit a header file with the given filename for this
      * function. The header will define a function with the type
@@ -387,7 +442,12 @@ public:
      * useful for checking what Halide is producing without having to
      * disassemble anything, or if you need to feed the assembly into
      * some custom toolchain to produce an object file (e.g. iOS) */
-    EXPORT void compile_to_assembly(const std::string &filename, std::vector<Argument>, const std::string &fn_name = "");
+    //@{
+    EXPORT void compile_to_assembly(const std::string &filename, std::vector<Argument>, const std::string &fn_name,
+                                    const Target &target = get_target_from_environment());
+    EXPORT void compile_to_assembly(const std::string &filename, std::vector<Argument>,
+                                    const Target &target = get_target_from_environment());
+    // @}
     /** Statically compile this function to C source code. This is
      * useful for providing fallback code paths that will compile on
      * many platforms. Vectorization will fail, and parallelization
@@ -404,13 +464,20 @@ public:
      * argument.
      */
     //@{
-    EXPORT void compile_to_file(const std::string &filename_prefix, std::vector<Argument> args);
-    EXPORT void compile_to_file(const std::string &filename_prefix);
-    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a);
-    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a, Argument b);
-    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a, Argument b, Argument c);
-    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a, Argument b, Argument c, Argument d);
-    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a, Argument b, Argument c, Argument d, Argument e);
+    EXPORT void compile_to_file(const std::string &filename_prefix, std::vector<Argument> args,
+                                const Target &target = get_target_from_environment());
+    EXPORT void compile_to_file(const std::string &filename_prefix,
+                                const Target &target = get_target_from_environment());
+    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a,
+                                const Target &target = get_target_from_environment());
+    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a, Argument b,
+                                const Target &target = get_target_from_environment());
+    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a, Argument b, Argument c,
+                                const Target &target = get_target_from_environment());
+    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a, Argument b, Argument c, Argument d,
+                                const Target &target = get_target_from_environment());
+    EXPORT void compile_to_file(const std::string &filename_prefix, Argument a, Argument b, Argument c, Argument d, Argument e,
+                                const Target &target = get_target_from_environment());
     // @}
 
     /** Eagerly jit compile the function to machine code. This
@@ -418,40 +485,45 @@ public:
      * running your halide pipeline inside time-sensitive code and
      * wish to avoid including the time taken to compile a pipeline,
      * then you can call this ahead of time. Returns the raw function
-     * pointer to the compiled pipeline. */
-    EXPORT void *compile_jit();
+     * pointer to the compiled pipeline. Default is to use the Target
+     * returned from Halide::get_jit_target_from_environment()
+     */
+     EXPORT void *compile_jit(const Target &target = get_jit_target_from_environment());
 
     /** Set the error handler function that be called in the case of
      * runtime errors during halide pipelines. If you are compiling
      * statically, you can also just define your own function with
      * signature
      \code
-     extern "C" void halide_error(const char *);
+     extern "C" void halide_error(void *user_context, const char *);
      \endcode
      * This will clobber Halide's version.
      */
-    EXPORT void set_error_handler(void (*handler)(const char *));
+    EXPORT void set_error_handler(void (*handler)(void *, const char *));
 
     /** Set a custom malloc and free for halide to use. Malloc should
      * return 32-byte aligned chunks of memory. If compiling
      * statically, routines with appropriate signatures can be
      * provided directly
      \code
-     extern "C" void *halide_malloc(size_t)
-     extern "C" void halide_free(void *)
+     extern "C" void *halide_malloc(void *, size_t)
+     extern "C" void halide_free(void *, void *)
      \endcode
      * These will clobber Halide's versions. See \file HalideRuntime.h
      * for declarations.
      */
-    EXPORT void set_custom_allocator(void *(*malloc)(size_t), void (*free)(void *));
+    EXPORT void set_custom_allocator(void *(*malloc)(void *, size_t),
+                                     void (*free)(void *, void *));
 
     /** Set a custom task handler to be called by the parallel for
      * loop. It is useful to set this if you want to do some
      * additional bookkeeping at the granularity of parallel
      * tasks. The default implementation does this:
      \code
-     extern "C" int halide_do_task(int (*f)(int, uint8_t *), int idx, uint8_t *state) {
-         return f(idx, state);
+     extern "C" int halide_do_task(void *user_context,
+                                   int (*f)(void *, int, uint8_t *),
+                                   int idx, uint8_t *state) {
+         return f(user_context, idx, state);
      }
      \endcode
      * If you are statically compiling, you can also just define your
@@ -461,16 +533,20 @@ public:
      * If you're trying to use a custom parallel runtime, you probably
      * don't want to call this. See instead \ref Func::set_custom_do_par_for .
     */
-    EXPORT void set_custom_do_task(int (*custom_do_task)(int (*)(int, uint8_t *), int, uint8_t *));
+    EXPORT void set_custom_do_task(
+        int (*custom_do_task)(void *, int (*)(void *, int, uint8_t *),
+                              int, uint8_t *));
 
     /** Set a custom parallel for loop launcher. Useful if your app
      * already manages a thread pool. The default implementation is
      * equivalent to this:
      \code
-     extern "C" int halide_do_par_for(int (*f)(int uint8_t *), int min, int extent, uint8_t *state) {
+     extern "C" int halide_do_par_for(void *user_context,
+                                      int (*f)(void *, int, uint8_t *),
+                                      int min, int extent, uint8_t *state) {
          int exit_status = 0;
          parallel for (int idx = min; idx < min+extent; idx++) {
-             int job_status = halide_do_task(f, idx, state);
+             int job_status = halide_do_task(user_context, f, idx, state);
              if (job_status) exit_status = job_status;
          }
          return exit_status;
@@ -485,7 +561,9 @@ public:
      * own version of the above function, and it will clobber Halide's
      * version.
      */
-    EXPORT void set_custom_do_par_for(int (*custom_do_par_for)(int (*)(int, uint8_t *), int, int, uint8_t *));
+    EXPORT void set_custom_do_par_for(
+        int (*custom_do_par_for)(void *, int (*)(void *, int, uint8_t *), int,
+                                 int, uint8_t *));
 
     /** Set custom routines to call when tracing is enabled. Call this
      * on the output Func of your pipeline. This then sets custom
@@ -699,46 +777,58 @@ public:
 
     /** Reorder variables to have the given nesting order, from
      * innermost out */
-    EXPORT Func &reorder(const std::vector<Var> &vars);
+    EXPORT Func &reorder(const std::vector<VarOrRVar> &vars);
 
     /** Reorder two dimensions so that x is traversed inside y. Does
      * not affect the nesting order of other dimensions. E.g, if you
      * say foo(x, y, z, w) = bar; foo.reorder(w, x); then foo will be
      * traversed in the order (w, y, z, x), from innermost
      * outwards. */
-    EXPORT Func &reorder(Var x, Var y);
+    EXPORT Func &reorder(VarOrRVar x, VarOrRVar y);
 
     /** Reorder three dimensions to have the given nesting order, from
      * innermost out */
-    EXPORT Func &reorder(Var x, Var y, Var z);
+    EXPORT Func &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z);
 
     /** Reorder four dimensions to have the given nesting order, from
      * innermost out */
-    EXPORT Func &reorder(Var x, Var y, Var z, Var w);
+    EXPORT Func &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                         VarOrRVar w);
 
     /** Reorder five dimensions to have the given nesting order, from
      * innermost out */
-    EXPORT Func &reorder(Var x, Var y, Var z, Var w, Var t);
+    EXPORT Func &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                         VarOrRVar w, VarOrRVar t);
 
     /** Reorder six dimensions to have the given nesting order, from
      * innermost out */
-    EXPORT Func &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2);
+    EXPORT Func &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                         VarOrRVar w, VarOrRVar t1, VarOrRVar t2);
 
     /** Reorder seven dimensions to have the given nesting order, from
      * innermost out */
-    EXPORT Func &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3);
+    EXPORT Func &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                         VarOrRVar w, VarOrRVar t1, VarOrRVar t2,
+                         VarOrRVar t3);
 
     /** Reorder eight dimensions to have the given nesting order, from
      * innermost out */
-    EXPORT Func &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4);
+    EXPORT Func &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                         VarOrRVar w, VarOrRVar t1, VarOrRVar t2,
+                         VarOrRVar t3, VarOrRVar t4);
 
     /** Reorder nine dimensions to have the given nesting order, from
      * innermost out */
-    EXPORT Func &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4, Var t5);
+    EXPORT Func &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                         VarOrRVar w, VarOrRVar t1, VarOrRVar t2,
+                         VarOrRVar t3, VarOrRVar t4, VarOrRVar t5);
 
     /** Reorder ten dimensions to have the given nesting order, from
      * innermost out */
-    EXPORT Func &reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4, Var t5, Var t6);
+    EXPORT Func &reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z,
+                         VarOrRVar w, VarOrRVar t1, VarOrRVar t2,
+                         VarOrRVar t3, VarOrRVar t4, VarOrRVar t5,
+                         VarOrRVar t6);
 
     /** Rename a dimension. Equivalent to split with a inner size of one. */
     EXPORT Func &rename(Var old_name, Var new_name);
@@ -773,9 +863,9 @@ public:
     // @{
     EXPORT Func &cuda(Var block_x, Var thread_x);
     EXPORT Func &cuda(Var block_x, Var block_y,
-                                Var thread_x, Var thread_y);
+                      Var thread_x, Var thread_y);
     EXPORT Func &cuda(Var block_x, Var block_y, Var block_z,
-                                Var thread_x, Var thread_y, Var thread_z);
+                      Var thread_x, Var thread_y, Var thread_z);
     // @}
 
     /** Short-hand for tiling a domain and mapping the tile indices
@@ -786,7 +876,7 @@ public:
     EXPORT Func &cuda_tile(Var x, int x_size);
     EXPORT Func &cuda_tile(Var x, Var y, int x_size, int y_size);
     EXPORT Func &cuda_tile(Var x, Var y, Var z,
-                                     int x_size, int y_size, int z_size);
+                           int x_size, int y_size, int z_size);
     // @}
 
     /** Specify how the storage for the function is laid out. These

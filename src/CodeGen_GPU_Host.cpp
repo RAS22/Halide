@@ -367,10 +367,11 @@ void CodeGen_GPU_Host::compile(Stmt stmt, string name,
 
     // Jump to the start of the function and insert a call to halide_init_kernels
     builder->SetInsertPoint(function->getEntryBlock().getFirstInsertionPt());
+    Value *user_context = get_user_context();
     Value *kernel_size = ConstantInt::get(i32, kernel_src.size());
     Value *init = module->getFunction("halide_init_kernels");
     assert(init && "Could not find function halide_init_kernels in initial module");
-    builder->CreateCall2(init, kernel_src_ptr, kernel_size);
+    builder->CreateCall3(init, user_context, kernel_src_ptr, kernel_size);
 
     // Optimize the module
     CodeGen::optimize_module();
@@ -527,8 +528,8 @@ void CodeGen_GPU_Host::visit(const For *loop) {
         string kernel_name = unique_name("kernel_" + loop->name, false);
         for (size_t i = 0; i < kernel_name.size(); i++) {
             switch (kernel_name[i]) {
-            case '$': 
-            case '.': 
+            case '$':
+            case '.':
                 kernel_name[i] = '_';
                 break;
             default:
@@ -542,15 +543,16 @@ void CodeGen_GPU_Host::visit(const For *loop) {
             // While internal buffers have all had their device
             // allocations done via static analysis, external ones
             // need to be dynamically checked
+            Value *user_context = get_user_context();
             Value *buf = sym_get(it->first + ".buffer");
             debug(4) << "halide_dev_malloc " << it->first << "\n";
-            builder->CreateCall(dev_malloc_fn, buf);
-            
+            builder->CreateCall2(dev_malloc_fn, user_context, buf);
+
             // Anything dirty on the cpu that gets read on the gpu
             // needs to be copied over
             if (it->second.read) {
                 debug(4) << "halide_copy_to_dev " << it->first << "\n";
-                builder->CreateCall(copy_to_dev_fn, buf);
+                builder->CreateCall2(copy_to_dev_fn, user_context, buf);
             }
         }
 
@@ -565,14 +567,14 @@ void CodeGen_GPU_Host::visit(const For *loop) {
         vector<Argument> closure_args = c.arguments();
         llvm::PointerType *arg_t = i8->getPointerTo(); // void*
         int num_args = (int)closure_args.size();
-        Value *saved_stack = save_stack();
-        Value *gpu_args_arr = builder->CreateAlloca(ArrayType::get(arg_t, num_args+1), // NULL-terminated list
-                                                    NULL,
-                                                    kernel_name + "_args");
 
-        Value *gpu_arg_sizes_arr = builder->CreateAlloca(ArrayType::get(target_size_t_type, num_args+1), // NULL-terminated list of size_t's
-                                                         NULL,
-                                                         kernel_name + "_arg_sizes");
+        Value *gpu_args_arr = create_alloca_at_entry(ArrayType::get(arg_t, num_args+1), // NULL-terminated list
+                                                     num_args+1,
+                                                     kernel_name + "_args");
+
+        Value *gpu_arg_sizes_arr = create_alloca_at_entry(ArrayType::get(target_size_t_type, num_args+1), // NULL-terminated list of size_t's
+                                                          num_args+1,
+                                                          kernel_name + "_arg_sizes");
 
         for (int i = 0; i < num_args; i++) {
             // get the closure argument
@@ -616,6 +618,7 @@ void CodeGen_GPU_Host::visit(const For *loop) {
         // TODO: only three dimensions can be passed to
         // cuLaunchKernel. How should we handle blkid_w?
         Value *launch_args[] = {
+            get_user_context(),
             entry_name_str,
             codegen(n_blkid_x), codegen(n_blkid_y), codegen(n_blkid_z),
             codegen(n_tid_x), codegen(n_tid_y), codegen(n_tid_z),
@@ -639,8 +642,6 @@ void CodeGen_GPU_Host::visit(const For *loop) {
             sym_pop(shared_mem_allocations[i]);
         }
 
-        // We did a bunch of allocas, so we need to restore the stack.
-        restore_stack(saved_stack);
     } else {
         CodeGen_X86::visit(loop);
     }
@@ -650,8 +651,8 @@ void CodeGen_GPU_Host::visit(const Allocate *alloc) {
     WhereIsBufferUsed usage(alloc->name);
     alloc->accept(&usage);
 
-    Allocation host_allocation = {NULL, 0, NULL};
-    Value *saved_stack = NULL;
+    Allocation host_allocation = {NULL, 0};
+
     if (usage.used_on_host) {
         debug(2) << alloc->name << " is used on the host\n";
         host_allocation = create_allocation(alloc->name, alloc->type, alloc->size);
@@ -663,12 +664,8 @@ void CodeGen_GPU_Host::visit(const Allocate *alloc) {
     Value *buf = NULL;
     if (usage.used_on_device) {
         debug(2) << alloc->name << " is used on the device\n";
-        // create a buffer_t to track this allocation
-        if (!host_allocation.saved_stack) {
-            // Save the stack pointer if we haven't already
-            saved_stack = save_stack();
-        }
-        buf = builder->CreateAlloca(buffer_t_type);
+
+        buf = create_alloca_at_entry(buffer_t_type, 1);
         Value *zero32 = ConstantInt::get(i32, 0),
             *one32  = ConstantInt::get(i32, 1),
             *null64 = ConstantInt::get(i64, 0),
@@ -704,16 +701,13 @@ void CodeGen_GPU_Host::visit(const Allocate *alloc) {
         builder->CreateStore(ConstantInt::get(i32, bytes),
                              buffer_elem_size_ptr(buf));
 
-        builder->CreateCall(dev_malloc_fn, buf);
+        Value *args[2] = { get_user_context(), buf };
+        builder->CreateCall(dev_malloc_fn, args);
 
         sym_push(alloc->name + ".buffer", buf);
     }
 
     codegen(alloc->body);
-
-    if (saved_stack) {
-        restore_stack(saved_stack);
-    }
 
     if (usage.used_on_host) {
         destroy_allocation(host_allocation);
@@ -728,7 +722,9 @@ void CodeGen_GPU_Host::visit(const Free *f) {
     }
 
     if (sym_exists(f->name + ".buffer")) {
-        builder->CreateCall(dev_free_fn, sym_get(f->name + ".buffer"));
+        Value *args[2] = { get_user_context(),
+                           sym_get(f->name + ".buffer") };
+        builder->CreateCall(dev_free_fn, args);
         sym_pop(f->name + ".buffer");
     }
 }
@@ -757,13 +753,14 @@ void CodeGen_GPU_Host::visit(const Pipeline *n) {
                              buffer_host_dirty_ptr(buf));
     }
 
+    Value *user_context = get_user_context();
     if (n->update.defined()) {
         WhereIsBufferUsed update_usage(n->name);
         n->update.accept(&update_usage);
 
         // Copy back host update reads
         if (update_usage.read_on_host) {
-            builder->CreateCall(copy_to_host_fn, buf);
+            builder->CreateCall2(copy_to_host_fn, user_context, buf);
         }
 
         codegen(n->update);
@@ -778,7 +775,7 @@ void CodeGen_GPU_Host::visit(const Pipeline *n) {
 
     // Copy back host reads
     if (consume_usage.read_on_host) {
-        builder->CreateCall(copy_to_host_fn, buf);
+        builder->CreateCall2(copy_to_host_fn, user_context, buf);
     }
 
     codegen(n->consume);
@@ -796,7 +793,8 @@ void CodeGen_GPU_Host::visit(const Call *call) {
         Value *buf = sym_get(func->name + ".buffer", false);
         if (buf) {
             // This buffer may have been last-touched on device
-            builder->CreateCall(copy_to_host_fn, buf);
+            Value *user_context = get_user_context();
+            builder->CreateCall2(copy_to_host_fn, user_context, buf);
         }
     }
 

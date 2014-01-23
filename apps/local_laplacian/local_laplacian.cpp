@@ -115,7 +115,7 @@ int main(int argc, char **argv) {
     remap.compute_root();
 
     Target target = get_target_from_environment();
-    if (target.features & Target::CUDA) {
+    if (target.features & (Target::CUDA | Target::OpenCL)) {
         // gpu schedule
         output.compute_root().cuda_tile(x, y, 32, 32);
         for (int j = 0; j < J; j++) {
@@ -145,7 +145,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    output.compile_to_file("local_laplacian", levels, alpha, beta, input);
+    output.compile_to_file("local_laplacian", levels, alpha, beta, input, target);
 
     return 0;
 }

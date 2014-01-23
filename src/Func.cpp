@@ -497,7 +497,6 @@ ScheduleHandle &ScheduleHandle::rename(Var old_var, Var new_var) {
     vector<Schedule::Dim> &dims = schedule.dims;
     for (size_t i = 0; (!found) && i < dims.size(); i++) {
         if (var_name_match(dims[i].var, old_var.name())) {
-            debug(0) << dims[i].var << " matches " << old_var.name() << "\n";
             found = true;
             old_name = dims[i].var;
             dims[i].var += "." + new_var.name();
@@ -571,12 +570,6 @@ ScheduleHandle &ScheduleHandle::unroll(Var var, int factor) {
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::bound(Var var, Expr min, Expr extent) {
-    Schedule::Bound b = {var.name(), min, extent};
-    schedule.bounds.push_back(b);
-    return *this;
-}
-
 ScheduleHandle &ScheduleHandle::tile(Var x, Var y, Var xo, Var yo, Var xi, Var yi, Expr xfactor, Expr yfactor) {
     split(x, xo, xi, xfactor);
     split(y, yo, yi, yfactor);
@@ -591,7 +584,7 @@ ScheduleHandle &ScheduleHandle::tile(Var x, Var y, Var xi, Var yi, Expr xfactor,
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::reorder(const std::vector<Var>& vars) {
+ScheduleHandle &ScheduleHandle::reorder(const std::vector<VarOrRVar>& vars) {
     if (vars.size() <= 1) {
         return *this;
     }
@@ -601,10 +594,10 @@ ScheduleHandle &ScheduleHandle::reorder(const std::vector<Var>& vars) {
     for(size_t i = 1; i < vars.size(); ++i) {
         reorder(vars[0], vars[i]);
     }
-    return reorder(std::vector<Var>(vars.begin() + 1, vars.end()));
+    return reorder(std::vector<VarOrRVar>(vars.begin() + 1, vars.end()));
 }
 
-ScheduleHandle &ScheduleHandle::reorder(Var x, Var y) {
+ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y) {
     vector<Schedule::Dim> &dims = schedule.dims;
     bool found_y = false;
     size_t y_loc = 0;
@@ -613,7 +606,9 @@ ScheduleHandle &ScheduleHandle::reorder(Var x, Var y) {
             found_y = true;
             y_loc = i;
         } else if (var_name_match(dims[i].var, x.name())) {
-            if (found_y) std::swap(dims[i], dims[y_loc]);
+            if (found_y) {
+                std::swap(dims[i], dims[y_loc]);
+            }
             return *this;
         }
     }
@@ -621,44 +616,44 @@ ScheduleHandle &ScheduleHandle::reorder(Var x, Var y) {
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::reorder(Var x, Var y, Var z) {
-    Var vars[]  = {x, y, z};
-    return reorder(std::vector<Var>(vars, vars + (sizeof(vars) / sizeof(Var))));
+ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z) {
+    VarOrRVar vars[]  = {x, y, z};
+    return reorder(std::vector<VarOrRVar>(vars, vars + (sizeof(vars) / sizeof(VarOrRVar))));
 }
 
-ScheduleHandle &ScheduleHandle::reorder(Var x, Var y, Var z, Var w) {
-    Var vars[]  = {x, y, z, w};
-    return reorder(std::vector<Var>(vars, vars + (sizeof(vars) / sizeof(Var))));
+ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w) {
+    VarOrRVar vars[]  = {x, y, z, w};
+    return reorder(std::vector<VarOrRVar>(vars, vars + (sizeof(vars) / sizeof(VarOrRVar))));
 }
 
-ScheduleHandle &ScheduleHandle::reorder(Var x, Var y, Var z, Var w, Var t) {
-    Var vars[]  = {x, y, z, w, t};
-    return reorder(std::vector<Var>(vars, vars + (sizeof(vars) / sizeof(Var))));
+ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w, VarOrRVar t) {
+    VarOrRVar vars[]  = {x, y, z, w, t};
+    return reorder(std::vector<VarOrRVar>(vars, vars + (sizeof(vars) / sizeof(VarOrRVar))));
 }
 
-ScheduleHandle &ScheduleHandle::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2) {
-    Var vars[]  = {x, y, z, w, t1, t2};
-    return reorder(std::vector<Var>(vars, vars + (sizeof(vars) / sizeof(Var))));
+ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w, VarOrRVar t1, VarOrRVar t2) {
+    VarOrRVar vars[]  = {x, y, z, w, t1, t2};
+    return reorder(std::vector<VarOrRVar>(vars, vars + (sizeof(vars) / sizeof(VarOrRVar))));
 }
 
-ScheduleHandle &ScheduleHandle::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3) {
-    Var vars[]  = {x, y, z, w, t1, t2, t3};
-    return reorder(std::vector<Var>(vars, vars + (sizeof(vars) / sizeof(Var))));
+ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w, VarOrRVar t1, VarOrRVar t2, VarOrRVar t3) {
+    VarOrRVar vars[]  = {x, y, z, w, t1, t2, t3};
+    return reorder(std::vector<VarOrRVar>(vars, vars + (sizeof(vars) / sizeof(VarOrRVar))));
 }
 
-ScheduleHandle &ScheduleHandle::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4) {
-    Var vars[]  = {x, y, z, w, t1, t2, t3, t4};
-    return reorder(std::vector<Var>(vars, vars + (sizeof(vars) / sizeof(Var))));
+ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w, VarOrRVar t1, VarOrRVar t2, VarOrRVar t3, VarOrRVar t4) {
+    VarOrRVar vars[]  = {x, y, z, w, t1, t2, t3, t4};
+    return reorder(std::vector<VarOrRVar>(vars, vars + (sizeof(vars) / sizeof(VarOrRVar))));
 }
 
-ScheduleHandle &ScheduleHandle::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4, Var t5) {
-    Var vars[]  = {x, y, z, w, t1, t2, t3, t4, t5};
-    return reorder(std::vector<Var>(vars, vars + (sizeof(vars) / sizeof(Var))));
+ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w, VarOrRVar t1, VarOrRVar t2, VarOrRVar t3, VarOrRVar t4, VarOrRVar t5) {
+    VarOrRVar vars[]  = {x, y, z, w, t1, t2, t3, t4, t5};
+    return reorder(std::vector<VarOrRVar>(vars, vars + (sizeof(vars) / sizeof(VarOrRVar))));
 }
 
-ScheduleHandle &ScheduleHandle::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4, Var t5, Var t6) {
-    Var vars[] = {x, y, z, w, t1, t2, t3, t4, t5, t6};
-    return reorder(std::vector<Var>(vars, vars + (sizeof(vars) / sizeof(Var))));
+ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w, VarOrRVar t1, VarOrRVar t2, VarOrRVar t3, VarOrRVar t4, VarOrRVar t5, VarOrRVar t6) {
+    VarOrRVar vars[] = {x, y, z, w, t1, t2, t3, t4, t5, t6};
+    return reorder(std::vector<VarOrRVar>(vars, vars + (sizeof(vars) / sizeof(VarOrRVar))));
 }
 
 ScheduleHandle &ScheduleHandle::cuda_threads(Var tx) {
@@ -808,7 +803,22 @@ Func &Func::unroll(Var var, int factor) {
 }
 
 Func &Func::bound(Var var, Expr min, Expr extent) {
-    ScheduleHandle(func.schedule()).bound(var, min, extent);
+    bool found = false;
+    for (size_t i = 0; i < func.args().size(); i++) {
+        if (var.name() == func.args()[i]) {
+            found = true;
+        }
+    }
+    if (!found) {
+        std::cerr << "Can't bound variable " << var.name()
+                  << " of function " << name()
+                  << " because " << var.name()
+                  << " is not one of the pure variables of " << name() << "\n";
+        assert(false);
+    }
+
+    Schedule::Bound b = {var.name(), min, extent};
+    func.schedule().bounds.push_back(b);
     return *this;
 }
 
@@ -822,52 +832,60 @@ Func &Func::tile(Var x, Var y, Var xi, Var yi, Expr xfactor, Expr yfactor) {
     return *this;
 }
 
-Func &Func::reorder(const std::vector<Var> &vars) {
+Func &Func::reorder(const std::vector<VarOrRVar> &vars) {
     ScheduleHandle(func.schedule()).reorder(vars);
     return *this;
 }
 
-Func &Func::reorder(Var x, Var y) {
+Func &Func::reorder(VarOrRVar x, VarOrRVar y) {
     ScheduleHandle(func.schedule()).reorder(x, y);
     return *this;
 }
 
-Func &Func::reorder(Var x, Var y, Var z) {
+Func &Func::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z) {
     ScheduleHandle(func.schedule()).reorder(x, y, z);
     return *this;
 }
 
-Func &Func::reorder(Var x, Var y, Var z, Var w) {
+Func &Func::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w) {
     ScheduleHandle(func.schedule()).reorder(x, y, z, w);
     return *this;
 }
 
-Func &Func::reorder(Var x, Var y, Var z, Var w, Var t) {
+Func &Func::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w,
+                    VarOrRVar t) {
     ScheduleHandle(func.schedule()).reorder(x, y, z, w, t);
     return *this;
 }
 
-Func &Func::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2) {
+Func &Func::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w,
+                    VarOrRVar t1, VarOrRVar t2) {
     ScheduleHandle(func.schedule()).reorder(x, y, z, w, t1, t2);
     return *this;
 }
 
-Func &Func::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3) {
+Func &Func::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w,
+                    VarOrRVar t1, VarOrRVar t2, VarOrRVar t3) {
     ScheduleHandle(func.schedule()).reorder(x, y, z, w, t1, t2, t3);
     return *this;
 }
 
-Func &Func::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4) {
+Func &Func::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w,
+                    VarOrRVar t1, VarOrRVar t2, VarOrRVar t3, VarOrRVar t4) {
     ScheduleHandle(func.schedule()).reorder(x, y, z, w, t1, t2, t3, t4);
     return *this;
 }
 
-Func &Func::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4, Var t5) {
+Func &Func::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w,
+                    VarOrRVar t1, VarOrRVar t2, VarOrRVar t3, VarOrRVar t4,
+                    VarOrRVar t5) {
     ScheduleHandle(func.schedule()).reorder(x, y, z, w, t1, t2, t3, t4, t5);
     return *this;
 }
 
-Func &Func::reorder(Var x, Var y, Var z, Var w, Var t1, Var t2, Var t3, Var t4, Var t5, Var t6) {
+Func &Func::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w,
+                    VarOrRVar t1, VarOrRVar t2, VarOrRVar t3, VarOrRVar t4,
+                    VarOrRVar t5, VarOrRVar t6) {
     ScheduleHandle(func.schedule()).reorder(x, y, z, w, t1, t2, t3, t4, t5, t6);
     return *this;
 }
@@ -1329,15 +1347,38 @@ FuncRefExpr::operator Tuple() const {
 }
 */
 
-Realization Func::realize(int x_size, int y_size, int z_size, int w_size) {
+Realization Func::realize(std::vector<int32_t> sizes, const Target &target) {
+    assert(defined() && "Can't realize undefined function");
+    vector<Buffer> outputs(func.outputs());
+    for (size_t i = 0; i < outputs.size(); i++) {
+        outputs[i] = Buffer(func.output_types()[i], sizes);
+    }
+    Realization r(outputs);
+    realize(r, target);
+    return r;
+}
+
+Realization Func::realize(int x_size, int y_size, int z_size, int w_size, const Target &target) {
     assert(defined() && "Can't realize undefined function");
     vector<Buffer> outputs(func.outputs());
     for (size_t i = 0; i < outputs.size(); i++) {
         outputs[i] = Buffer(func.output_types()[i], x_size, y_size, z_size, w_size);
     }
     Realization r(outputs);
-    realize(r);
+    realize(r, target);
     return r;
+}
+
+Realization Func::realize(int x_size, int y_size, int z_size, const Target &target) {
+    return realize(x_size, y_size, z_size, 0, target);
+}
+
+Realization Func::realize(int x_size, int y_size, const Target &target) {
+    return realize(x_size, y_size, 0, 0, target);
+}
+
+Realization Func::realize(int x_size, const Target &target) {
+    return realize(x_size, 0, 0, 0, target);
 }
 
 void Func::infer_input_bounds(int x_size, int y_size, int z_size, int w_size) {
@@ -1499,7 +1540,8 @@ void validate_arguments(const string &output,
 }
 
 
-void Func::compile_to_bitcode(const string &filename, vector<Argument> args, const string &fn_name) {
+  void Func::compile_to_bitcode(const string &filename, vector<Argument> args, const string &fn_name,
+                                const Target &target) {
     assert(defined() && "Can't compile undefined function");
 
     if (!lowered.defined()) {
@@ -1513,12 +1555,17 @@ void Func::compile_to_bitcode(const string &filename, vector<Argument> args, con
         args.push_back(output_buffers()[i]);
     }
 
-    StmtCompiler cg(get_target_from_environment());
+    StmtCompiler cg(target);
     cg.compile(lowered, fn_name.empty() ? name() : fn_name, args, images_to_embed);
     cg.compile_to_bitcode(filename);
 }
 
-void Func::compile_to_object(const string &filename, vector<Argument> args, const string &fn_name) {
+void Func::compile_to_bitcode(const string &filename, vector<Argument> args, const Target &target) {
+    compile_to_bitcode(filename, args, "", target);
+}
+
+  void Func::compile_to_object(const string &filename, vector<Argument> args, const string &fn_name,
+                               const Target &target) {
     assert(defined() && "Can't compile undefined function");
 
     if (!lowered.defined()) {
@@ -1532,9 +1579,13 @@ void Func::compile_to_object(const string &filename, vector<Argument> args, cons
         args.push_back(output_buffers()[i]);
     }
 
-    StmtCompiler cg(get_target_from_environment());
+    StmtCompiler cg(target);
     cg.compile(lowered, fn_name.empty() ? name() : fn_name, args, images_to_embed);
     cg.compile_to_native(filename, false);
+}
+
+void Func::compile_to_object(const string &filename, vector<Argument> args, const Target &target) {
+    compile_to_object(filename, args, "", target);
 }
 
 void Func::compile_to_header(const string &filename, vector<Argument> args, const string &fn_name) {
@@ -1573,36 +1624,43 @@ void Func::compile_to_lowered_stmt(const string &filename) {
     stmt_output << lowered;
 }
 
-void Func::compile_to_file(const string &filename_prefix, vector<Argument> args) {
+void Func::compile_to_file(const string &filename_prefix, vector<Argument> args,
+                           const Target &target) {
     compile_to_header(filename_prefix + ".h", args, filename_prefix);
-    compile_to_object(filename_prefix + ".o", args, filename_prefix);
+    compile_to_object(filename_prefix + ".o", args, filename_prefix, target);
 }
 
-void Func::compile_to_file(const string &filename_prefix) {
-    compile_to_file(filename_prefix, vector<Argument>());
+void Func::compile_to_file(const string &filename_prefix, const Target &target) {
+  compile_to_file(filename_prefix, vector<Argument>(), target);
 }
 
-void Func::compile_to_file(const string &filename_prefix, Argument a) {
-    compile_to_file(filename_prefix, Internal::vec(a));
+void Func::compile_to_file(const string &filename_prefix, Argument a,
+                           const Target &target) {
+  compile_to_file(filename_prefix, Internal::vec(a), target);
 }
 
-void Func::compile_to_file(const string &filename_prefix, Argument a, Argument b) {
-    compile_to_file(filename_prefix, Internal::vec(a, b));
+void Func::compile_to_file(const string &filename_prefix, Argument a, Argument b,
+                           const Target &target) {
+  compile_to_file(filename_prefix, Internal::vec(a, b), target);
 }
 
-void Func::compile_to_file(const string &filename_prefix, Argument a, Argument b, Argument c) {
-    compile_to_file(filename_prefix, Internal::vec(a, b, c));
+void Func::compile_to_file(const string &filename_prefix, Argument a, Argument b, Argument c,
+                           const Target &target) {
+  compile_to_file(filename_prefix, Internal::vec(a, b, c), target);
 }
 
-void Func::compile_to_file(const string &filename_prefix, Argument a, Argument b, Argument c, Argument d) {
-    compile_to_file(filename_prefix, Internal::vec(a, b, c, d));
+void Func::compile_to_file(const string &filename_prefix, Argument a, Argument b, Argument c, Argument d,
+                           const Target &target) {
+  compile_to_file(filename_prefix, Internal::vec(a, b, c, d), target);
 }
 
-void Func::compile_to_file(const string &filename_prefix, Argument a, Argument b, Argument c, Argument d, Argument e) {
-    compile_to_file(filename_prefix, Internal::vec(a, b, c, d, e));
+void Func::compile_to_file(const string &filename_prefix, Argument a, Argument b, Argument c, Argument d, Argument e,
+                           const Target &target) {
+  compile_to_file(filename_prefix, Internal::vec(a, b, c, d, e), target);
 }
 
-void Func::compile_to_assembly(const string &filename, vector<Argument> args, const string &fn_name) {
+void Func::compile_to_assembly(const string &filename, vector<Argument> args, const string &fn_name,
+                               const Target &target) {
     assert(defined() && "Can't compile undefined function");
 
     if (!lowered.defined()) lowered = Halide::Internal::lower(func);
@@ -1614,19 +1672,24 @@ void Func::compile_to_assembly(const string &filename, vector<Argument> args, co
         args.push_back(output_buffers()[i]);
     }
 
-    StmtCompiler cg(get_target_from_environment());
+    StmtCompiler cg(target);
     cg.compile(lowered, fn_name.empty() ? name() : fn_name, args, images_to_embed);
     cg.compile_to_native(filename, true);
 }
 
-void Func::set_error_handler(void (*handler)(const char *)) {
+void Func::compile_to_assembly(const string &filename, vector<Argument> args, const Target &target) {
+    compile_to_assembly(filename, args, "", target);
+}
+
+void Func::set_error_handler(void (*handler)(void *, const char *)) {
     error_handler = handler;
     if (compiled_module.set_error_handler) {
         compiled_module.set_error_handler(handler);
     }
 }
 
-void Func::set_custom_allocator(void *(*cust_malloc)(size_t), void (*cust_free)(void *)) {
+void Func::set_custom_allocator(void *(*cust_malloc)(void *, size_t),
+                                void (*cust_free)(void *, void *)) {
     custom_malloc = cust_malloc;
     custom_free = cust_free;
     if (compiled_module.set_custom_allocator) {
@@ -1634,14 +1697,14 @@ void Func::set_custom_allocator(void *(*cust_malloc)(size_t), void (*cust_free)(
     }
 }
 
-void Func::set_custom_do_par_for(int (*cust_do_par_for)(int (*)(int, uint8_t *), int, int, uint8_t *)) {
+void Func::set_custom_do_par_for(int (*cust_do_par_for)(void *, int (*)(void *, int, uint8_t *), int, int, uint8_t *)) {
     custom_do_par_for = cust_do_par_for;
     if (compiled_module.set_custom_do_par_for) {
         compiled_module.set_custom_do_par_for(cust_do_par_for);
     }
 }
 
-void Func::set_custom_do_task(int (*cust_do_task)(int (*)(int, uint8_t *), int, uint8_t *)) {
+void Func::set_custom_do_task(int (*cust_do_task)(void *, int (*)(void *, int, uint8_t *), int, uint8_t *)) {
     custom_do_task = cust_do_task;
     if (compiled_module.set_custom_do_task) {
         compiled_module.set_custom_do_task(cust_do_task);
@@ -1655,12 +1718,12 @@ void Func::set_custom_trace(Internal::JITCompiledModule::TraceFn t) {
     }
 }
 
-void Func::realize(Buffer b) {
-    realize(Realization(vec<Buffer>(b)));
+  void Func::realize(Buffer b, const Target &target) {
+    realize(Realization(vec<Buffer>(b)), target);
 }
 
-void Func::realize(Realization dst) {
-    if (!compiled_module.wrapped_function) compile_jit();
+  void Func::realize(Realization dst, const Target &target) {
+    if (!compiled_module.wrapped_function) compile_jit(target);
 
     assert(compiled_module.wrapped_function);
 
@@ -1807,7 +1870,7 @@ void Func::infer_input_bounds(Realization dst) {
     }
 }
 
-void *Func::compile_jit() {
+void *Func::compile_jit(const Target &target) {
     assert(defined() && "Can't realize undefined function");
 
     if (!lowered.defined()) lowered = Halide::Internal::lower(func);
@@ -1836,8 +1899,7 @@ void *Func::compile_jit() {
                          << infer_args.arg_types[i].is_buffer << "\n";
     }
 
-    Target t = get_target_from_environment();
-    // TODO: Validate that we can reasonably jit to this target
+    Target t = target;
     t.features |= Target::JIT;
     StmtCompiler cg(t);
     cg.compile(lowered, name(), infer_args.arg_types, vector<Buffer>());

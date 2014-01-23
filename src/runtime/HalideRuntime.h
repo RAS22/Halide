@@ -25,6 +25,12 @@ extern "C" {
  * compiled must be called instead. The corresponding methods are
  * documented below.
  *
+ * All of these functions take a "void *user_context" parameter as their
+ * first argument; if the Halide kernel that calls back to any of these
+ * funcions has been defined with a "__user_context" parameter XXXXXXXX,
+ * then the value of that pointer passed from the code that calls the
+ * Halide kernel is piped through to the function.
+ *
  * Some of these are also useful to call when using the default
  * implementation. E.g. halide_shutdown_thread_pool.
  */
@@ -36,7 +42,7 @@ extern "C" {
   *
   * Cannot be replaced in JITted code at present.
   */
-extern int halide_printf(const char *, ...);
+extern int halide_printf(void *user_context, const char *, ...);
 
 /** Define halide_error to catch errors messages at runtime, for
  * example bounds checking failures. Per the description above, use
@@ -44,10 +50,10 @@ extern int halide_printf(const char *, ...);
  * implementation of halide_error in AOT code.  See
  * Func::set_error_handler.
  */
-extern void halide_error(const char *msg);
+extern void halide_error(void *user_context, const char *msg);
 
 /** A macro that calls halide_error if the supplied condition is false. */
-#define halide_assert(cond) if (!(cond)) halide_error( #cond );
+#define halide_assert(user_context, cond) if (!(cond)) halide_error(user_context, #cond);
 
 /** Define halide_do_par_for to replace the default thread pool
  * implementation. halide_shutdown_thread_pool can also be called to
@@ -60,7 +66,9 @@ extern void halide_error(const char *msg);
  * jobs otherwise.
  */
 //@{
-extern int halide_do_par_for(int (*f)(int, uint8_t *), int min, int size, uint8_t *closure);
+extern int halide_do_par_for(void *user_context,
+                             int (*f)(void *ctx, int, uint8_t *),
+                             int min, int size, uint8_t *closure);
 extern void halide_shutdown_thread_pool();
 //@}
 
@@ -69,8 +77,8 @@ extern void halide_shutdown_thread_pool();
  * halide_malloc must return a 32-byte aligned pointer.)
  */
 //@{
-extern void *halide_malloc(size_t x);
-extern void halide_free(void *ptr);
+extern void *halide_malloc(void *user_context, size_t x);
+extern void halide_free(void *user_context, void *ptr);
 //@}
 
 /** Called when debug_to_file is used inside %Halide code.  See
@@ -78,9 +86,10 @@ extern void halide_free(void *ptr);
  *
  * Cannot be replaced in JITted code at present.
  */
-extern int32_t halide_debug_to_file(const char *filename, uint8_t *data,
-                                    int32_t s0, int32_t s1, int32_t s2, int32_t s3,
-                                    int32_t type_code, int32_t bytes_per_element);
+extern int32_t halide_debug_to_file(void *user_context, const char *filename,
+                                    uint8_t *data, int32_t s0, int32_t s1, int32_t s2,
+                                    int32_t s3, int32_t type_code,
+                                    int32_t bytes_per_element);
 
 
 enum halide_trace_event_t {halide_trace_load = 0,
@@ -99,14 +108,37 @@ enum halide_trace_event_t {halide_trace_load = 0,
  * yet-to-be-documented binary format (see src/runtime/tracing.cpp to
  * reverse engineer the format). If the trace is going to be large,
  * you may want to make the file a named pipe, and then read from that
- * pipe into gzip. */
-extern void halide_trace(const char *func, halide_trace_event_t event,
-                         int32_t type_code, int32_t bits, int32_t vector_width,
-                         int32_t value_idx, void *value,
-                         int32_t dimensions, const int32_t *coordinates);
+ * pipe into gzip.
+ *
+ * halide_trace returns a unique ID which will be passed to future
+ * events that "belong" to the earlier event as the parent id. The
+ * ownership hierarchy looks like:
+ *
+ * begin_realization
+ *    produce
+ *      store
+ *      update
+ *      load/store
+ *      consume
+ *      load
+ *      end_consume
+ *    end_realization
+ *
+ * Threading means that ownership cannot be inferred from the ordering
+ * of events. There can be many active realizations of a given
+ * function, or many active productions for a single
+ * realization. Within a single production, the ordering of events is
+ * meaningful.
+ */
+extern int32_t halide_trace(void *user_context, const char *func,
+                            halide_trace_event_t event, int32_t parent_id,
+                            int32_t type_code, int32_t bits, int32_t vector_width,
+                            int32_t value_idx, void *value,
+                            int32_t dimensions, const int32_t *coordinates);
 
-/** If tracing is writing to a file. This call closes that file (flushing the trace). */
-extern void halide_shutdown_trace();
+/** If tracing is writing to a file. This call closes that file
+ * (flushing the trace). Returns zero on success. */
+extern int halide_shutdown_trace();
 
 #ifdef __cplusplus
 } // End extern "C"

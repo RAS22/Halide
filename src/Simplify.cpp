@@ -752,6 +752,8 @@ private:
         const Broadcast *broadcast_b = b.as<Broadcast>();
         const Add *add_a = a.as<Add>();
         const Add *add_b = b.as<Add>();
+        const Div *div_a = a.as<Div>();
+        const Div *div_b = b.as<Div>();
         const Sub *sub_a = a.as<Sub>();
         const Sub *sub_b = b.as<Sub>();
         const Min *min_a = a.as<Min>();
@@ -919,6 +921,17 @@ private:
         } else if (add_a && add_b && equal(add_a->b, add_b->a)) {
             // min(a + b, b + c) -> min(a, c) + b
             expr = mutate(min(add_a->a, add_b->b)) + add_a->b;
+
+        } else if (div_a && div_b &&
+                   const_int(div_a->b, &ia) &&
+                   const_int(div_b->b, &ib) &&
+                   (ia == ib)) {
+            // min(a / 4, b / 4) -> min(a, b) / 4
+            if (ia > 0) {
+                expr = mutate(min(div_a->a, div_b->a) / ia);
+            } else {
+                expr = mutate(max(div_a->a, div_b->a) / ia);
+            }
         } else if (a.same_as(op->a) && b.same_as(op->b)) {
             expr = op;
         } else {
@@ -934,12 +947,14 @@ private:
             std::swap(a, b);
         }
 
-        int ia = 0, ib = 0;
+        int ia = 0, ib = 0; //, ic = 0, id = 0;
         float fa = 0.0f, fb = 0.0f;
         const Broadcast *broadcast_a = a.as<Broadcast>();
         const Broadcast *broadcast_b = b.as<Broadcast>();
         const Add *add_a = a.as<Add>();
         const Add *add_b = b.as<Add>();
+        const Div *div_a = a.as<Div>();
+        const Div *div_b = b.as<Div>();
         const Sub *sub_a = a.as<Sub>();
         const Sub *sub_b = b.as<Sub>();
         const Max *max_a = a.as<Max>();
@@ -952,6 +967,9 @@ private:
 
         const Min *min_a_a = max_a ? max_a->a.as<Min>() : NULL;
         const Min *min_b_a = max_b ? max_b->a.as<Min>() : NULL;
+
+        //const Add *add_a_a = div_a ? div_a->a.as<Add>() : NULL;
+        //const Add *add_b_a = div_b ? div_b->a.as<Add>() : NULL;
 
         if (equal(a, b)) {
             expr = a;
@@ -1070,14 +1088,16 @@ private:
             // max(a + b, b + c) -> max(a, c) + b
             expr = mutate(max(add_a->a, add_b->b)) + add_a->b;
 
-        } else if (false && add_a && add_b && const_int(add_a->b, &ia) && const_int(add_b->b, &ib)) {
-            // Shuffle constants outside
-            // max(x + 2, y + 3) -> max(x, y + 1) + 2
-            expr = mutate(Max::make(add_a->a, add_b->a + (ib - ia))) + ia;
-        } else if (false && add_a && const_int(add_a->b, &ia) && const_int(b, &ib)) {
-            // max(x + 3, 5) -> max(x, 2) + 3
-            expr = mutate(Max::make(add_a->a, ib - ia) + ia);
-
+        } else if (div_a && div_b &&
+                   const_int(div_a->b, &ia) &&
+                   const_int(div_b->b, &ib) &&
+                   (ia == ib)) {
+            // max(a / 4, b / 4) -> max(a, b) / 4
+            if (ia > 0) {
+                expr = mutate(max(div_a->a, div_b->a) / ia);
+            } else {
+                expr = mutate(min(div_a->a, div_b->a) / ia);
+            }
         } else if (a.same_as(op->a) && b.same_as(op->b)) {
             expr = op;
         } else {
@@ -1539,12 +1559,6 @@ private:
         info = var_info.get(op->name);
         var_info.pop(op->name);
 
-        if (body.same_as(op->body) &&
-            value.same_as(op->value) &&
-            !new_value.defined()) {
-            return op;
-        }
-
         Body result = body;
 
         if (new_value.defined() && info.new_uses > 0) {
@@ -1555,6 +1569,16 @@ private:
         if (info.old_uses > 0 || !remove_dead_lets) {
             // The old name is still in use. We'd better keep it as well.
             result = T::make(op->name, value, result);
+        }
+
+        // Don't needlessly make a new Let/LetStmt node.  (Here's a
+        // piece of template syntax I've never needed before).
+        const T *new_op = result.template as<T>();
+        if (new_op &&
+            new_op->name == op->name &&
+            new_op->body.same_as(op->body) &&
+            new_op->value.same_as(op->value)) {
+            return op;
         }
 
         return result;
@@ -2026,6 +2050,12 @@ void simplify_test() {
     check(Ramp::make(0, 1, 4) == Broadcast::make(2, 4),
           Ramp::make(0, 1, 4) == Broadcast::make(2, 4));
 
+    check(min(x/4, y/4), min(x, y)/4);
+    check(max(x/4, y/4), max(x, y)/4);
+
+    check(min(x/(-4), y/(-4)), max(x, y)/(-4));
+    check(max(x/(-4), y/(-4)), min(x, y)/(-4));
+
     check(!f, t);
     check(!t, f);
     check(!(x < y), y <= x);
@@ -2057,6 +2087,7 @@ void simplify_test() {
 
     // Check that dead lets get stripped
     check(Let::make("x", 3*y*y*y, 4), 4);
+    check(Let::make("x", 0, 0), 0);
 
     std::cout << "Simplify test passed" << std::endl;
 }

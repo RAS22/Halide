@@ -37,14 +37,25 @@
 #include <string.h>
 #include <sstream>
 
-#include "halide_game_of_life.h"
+#include "game_of_life_init.h"
+#include "game_of_life_update.h"
+#include "game_of_life_render.h"
+
+#include "julia_init.h"
+#include "julia_update.h"
+#include "julia_render.h"
+
+#include "reaction_diffusion_init.h"
+#include "reaction_diffusion_update.h"
+#include "reaction_diffusion_render.h"
+
+#include "reaction_diffusion_2_init.h"
+#include "reaction_diffusion_2_update.h"
+#include "reaction_diffusion_2_render.h"
 
 #define WIDTH 1024
 #define HEIGHT 1024
 #define MARGIN 8
-
-// A low-level scalar C version to use for timing comparisons
-extern "C" void c_game_of_life(buffer_t *in, buffer_t *out);
 
 using namespace pp;
 
@@ -53,6 +64,13 @@ void completion_callback(void *data, int32_t flags) {
     fprintf(stderr, "Got a completion callback with data %p flags %d\n", data, flags);
     busy = false;
 }
+
+extern "C" int my_rand(int, int, int) {
+    return rand();
+}
+
+extern "C" void *halide_malloc(void *, size_t);
+extern "C" void halide_free(void *, void *);
 
 buffer_t ImageToBuffer(const ImageData &im) {
     buffer_t buf;
@@ -72,6 +90,7 @@ bool pipeline_barfed = false;
 static Instance *inst = NULL;
 // TODO: use user context instead of globals above...
 extern "C" void halide_error(void */* user_context */, char *msg) {
+    printf("halide_error: %s\n", msg);
     if (inst) {
         inst->PostMessage(msg);
         pipeline_barfed = true;
@@ -87,78 +106,80 @@ extern "C" void halide_error(void */* user_context */, char *msg) {
 /// To communicate with the browser, you must override HandleMessage() for
 /// receiving messages from the browser, and use PostMessage() to send messages
 /// back to the browser.  Note that this interface is asynchronous.
-class HelloHalideInstance : public Instance {
+class HalideDemosInstance : public Instance {
 public:
     Graphics2D graphics;
-    ImageData im1, im2;
+    ImageData framebuffer;
     CompletionCallback callback;
+
+    int mouse_x, mouse_y;
+
+    buffer_t state_1, state_2, render_target;
 
     /// The constructor creates the plugin-side instance.
     /// @param[in] instance the handle to the browser-side plugin instance.
-    explicit HelloHalideInstance(PP_Instance instance) :
+    explicit HalideDemosInstance(PP_Instance instance) :
         Instance(instance),
         graphics(this, Size(WIDTH, HEIGHT), false),
-        im1(this, PP_IMAGEDATAFORMAT_BGRA_PREMUL, Size(WIDTH, HEIGHT), false),
-        im2(this, PP_IMAGEDATAFORMAT_BGRA_PREMUL, Size(WIDTH, HEIGHT), false),
+        framebuffer(this, PP_IMAGEDATAFORMAT_BGRA_PREMUL, Size(WIDTH, HEIGHT), false),
         callback(completion_callback, this) {
 
-        printf("HelloHalideInstance constructor\n");
+        printf("HalideDemosInstance constructor\n");
         BindGraphics(graphics);
         RequestInputEvents(PP_INPUTEVENT_CLASS_MOUSE);
         inst = this;
+
+        memset(&state_1, 0, sizeof(buffer_t));
+        memset(&state_2, 0, sizeof(buffer_t));
+        render_target = ImageToBuffer(framebuffer);
     }
-    virtual ~HelloHalideInstance() {}
+
+    virtual ~HalideDemosInstance() {
+        free(state_1.host);
+        free(state_2.host);
+    }
 
     virtual bool HandleInputEvent(const pp::InputEvent &event) {
         if (event.GetType() == PP_INPUTEVENT_TYPE_MOUSEMOVE) {
             pp::MouseInputEvent ev(event);
             Point p = ev.GetPosition();
-            for (int dy = -4; dy <= 4; dy++) {
-                int y = p.y() + dy;
-                if (y < MARGIN) y = MARGIN;
-                if (y > HEIGHT - MARGIN - 1) y = HEIGHT - MARGIN - 1;
-                for (int dx = -4; dx <= 4; dx++) {
-                    int x = p.x() + dx;
-                    if (x < MARGIN) x = MARGIN;
-                    if (x > WIDTH - MARGIN - 1) x = WIDTH - MARGIN - 1;
-                    if (dx*dx + dy*dy < 4*4) {
-                        uint32_t col;
-                        switch (rand() & 3) {
-                        case 0:
-                            col = 0x000000ff;
-                            break;
-                        case 1:
-                            col = 0x0000ffff;
-                            break;
-                        case 2:
-                            col = 0x00ff00ff;
-                            break;
-                        case 3:
-                            col = 0xff0000ff;
-                        }
-                        Point q(x, y);
-                        *(im1.GetAddr32(q)) = col;
-                        *(im2.GetAddr32(q)) = col;
-                    }
-                }
-            }
-
+            mouse_x = p.x();
+            mouse_y = p.y();
             return true;
         }
         return false;
     }
 
-    /// Handler for messages coming in from the browser via postMessage().  The
-    /// @a var_message can contain anything: a JSON string; a string that encodes
-    /// method names and arguments; etc.  For example, you could use
-    /// JSON.stringify in the browser to create a message that contains a method
-    /// name and some parameters, something like this:
-    ///   var json_message = JSON.stringify({ "myMethod" : "3.14159" });
-    ///   nacl_module.postMessage(json_message);
-    /// On receipt of this message in @a var_message, you could parse the JSON to
-    /// retrieve the method name, match it to a function call, and then call it
-    /// with the parameter.
-    /// @param[in] var_message The message posted by the browser.
+    void print_buffer(buffer_t *b) {
+        printf("buffer = {%p, %d %d %d %d, %d %d %d %d, %d %d %d %d}\n",
+               b->host,
+               b->min[0], b->min[1], b->min[2], b->min[3],
+               b->extent[0], b->extent[1], b->extent[2], b->extent[3],
+               b->stride[0], b->stride[1], b->stride[2], b->stride[3]);
+    }
+
+
+    void alloc_buffer(buffer_t *b) {
+        size_t sz = b->elem_size;
+        for (int i = 0; i < 4; i++) {
+            if (b->extent[i]) {
+                sz *= b->extent[i];
+            }
+        }
+        b->host = (uint8_t *)halide_malloc(NULL, sz);
+
+        std::ostringstream oss;
+        oss << "Buffer size = " << sz << " pointer = " << ((size_t)b->host) << "\n";
+        PostMessage(oss.str());
+    }
+
+    void free_buffer(buffer_t *b) {
+        if (b->host) {
+            halide_free(NULL, b->host);
+        }
+        memset(b, 0, sizeof(buffer_t));
+    }
+
     virtual void HandleMessage(const Var& var_message) {
 
         if (busy) return;
@@ -167,9 +188,9 @@ public:
         static int thread_pool_size = 8;
         static int halide_last_t = 0;
         static int halide_time_weight = 0;
-        static int c_last_t = 0;
-        static int c_time_weight = 0;
-        static bool use_halide = true;
+        static int last_demo = -1;
+
+        int demo = 0;
 
         if (var_message.is_string()) {
             std::string msg = var_message.AsString();
@@ -185,76 +206,108 @@ public:
                 halide_last_t = 0;
                 halide_time_weight = 0;
             }
-
-            bool new_use_halide = (msg[0] == '0');
-            if (new_use_halide != use_halide) {
-                use_halide = new_use_halide;
-            }
+            demo = msg[0] - '0';
         }
 
-        buffer_t input = ImageToBuffer(im1);
-        buffer_t output = ImageToBuffer(im2);
-
-        // Only compute the inner part of output so that we don't have
-        // to worry about boundary conditions.
-        output.min[0] = output.min[1] = MARGIN;
-        output.extent[0] -= MARGIN*2;
-        output.extent[1] -= MARGIN*2;
-        output.host += (output.stride[1] + output.stride[0]) * MARGIN * 4;
-
-        // Initialize the input with noise
         static bool first_run = true;
         if (first_run) {
             first_run = false;
-
-            // Start with 8 threads
             setenv("HL_NUMTHREADS", "8", 1);
+        }
 
-            //  Initialize the buffers
-            memset(im2.data(), 0, im2.stride() * im2.size().height());
+        // Initialize the input
+        if (demo != last_demo) {
+            last_demo = demo;
 
-            for (int y = 0; y < HEIGHT; y++) {
-                uint8_t *ptr = ((uint8_t *)im1.data()) + im1.stride() * y;
-                for (int x = 0; x < WIDTH; x++) {
-                    ptr[x*4] = ((rand() & 31) == 0) ? 255 : 0;
-                    ptr[x*4+1] = ((rand() & 31) == 0) ? 255 : 0;
-                    ptr[x*4+2] = ((rand() & 31) == 0) ? 255 : 0;
-                    ptr[x*4+3] = (x >= MARGIN &&
-                                  (x < (WIDTH - MARGIN)) &&
-                                   y >= MARGIN &&
-                                   y < (HEIGHT - MARGIN)) ? 255 : 0;
-                }
+            // Delete any existing state
+            free_buffer(&state_1);
+            free_buffer(&state_2);
+
+            halide_last_t = 0;
+            halide_time_weight = 0;
+
+            switch (demo) {
+            case 0:
+                // Query how large the state arrays need to be in
+                // order to hit our render target using Halide's
+                // bounds query mode.
+                game_of_life_render(&state_1, &render_target);
+                state_2 = state_1;
+                alloc_buffer(&state_1);
+                alloc_buffer(&state_2);
+                // Initialize into the first one
+                game_of_life_init(&state_1);
+                break;
+            case 1:
+                julia_render(&state_1, &render_target);
+                state_2 = state_1;
+                alloc_buffer(&state_1);
+                alloc_buffer(&state_2);
+                julia_init(&state_1);
+                break;
+            case 2:
+                reaction_diffusion_render(&state_1, &render_target);
+                state_2 = state_1;
+                alloc_buffer(&state_1);
+                alloc_buffer(&state_2);
+                print_buffer(&state_1);
+                reaction_diffusion_init(&state_1);
+                break;
+            case 3:
+                reaction_diffusion_2_render(&state_1, &render_target);
+                state_2 = state_1;
+                alloc_buffer(&state_1);
+                alloc_buffer(&state_2);
+                print_buffer(&state_1);
+                reaction_diffusion_2_init(&state_1);
+                break;
+            default:
+                PostMessage("Bad demo index");
+                return;
             }
+        }
 
+        if (pipeline_barfed) {
+            return;
         }
 
         timeval t1, t2;
         gettimeofday(&t1, NULL);
-        if (use_halide) {
-            halide_game_of_life(&input, &output);
-        } else {
-            c_game_of_life(&input, &output);
+        switch (demo) {
+        case 0:
+            game_of_life_update(&state_1, mouse_x, mouse_y, &state_2);
+            game_of_life_render(&state_2, &render_target);
+            break;
+        case 1:
+            julia_update(&state_1, mouse_x, mouse_y, &state_2);
+            julia_render(&state_2, &render_target);
+            break;
+        case 2:
+            reaction_diffusion_update(&state_1, mouse_x, mouse_y, &state_2);
+            reaction_diffusion_render(&state_2, &render_target);
+            break;
+        case 3:
+            reaction_diffusion_2_update(&state_1, mouse_x, mouse_y, &state_2);
+            reaction_diffusion_2_render(&state_2, &render_target);
+            break;
         }
         gettimeofday(&t2, NULL);
+        std::swap(state_1, state_2);
 
-        if (pipeline_barfed) return;
+        mouse_x = mouse_y = -100;
+
+        if (pipeline_barfed) {
+            return;
+        }
 
         int t = t2.tv_usec - t1.tv_usec;
         t += (t2.tv_sec - t1.tv_sec)*1000000;
 
         // Smooth it out so we can see a rolling average
-        if (use_halide) {
-            t = (halide_last_t * halide_time_weight + t) / (halide_time_weight + 1);
-            halide_last_t = t;
-            if (halide_time_weight < 100) {
-                halide_time_weight++;
-            }
-        } else {
-            t = (c_last_t * c_time_weight + t) / (c_time_weight + 1);
-            c_last_t = t;
-            if (c_time_weight < 100) {
-                c_time_weight++;
-            }
+        t = (halide_last_t * halide_time_weight + t) / (halide_time_weight + 1);
+        halide_last_t = t;
+        if (halide_time_weight < 100) {
+            halide_time_weight++;
         }
 
         std::ostringstream oss;
@@ -262,43 +315,30 @@ public:
         if (halide_time_weight < 10) {
             oss << "?";
         } else {
-            if (use_halide) oss << "<b>";
             oss << halide_last_t;
-            if (use_halide) oss << "</b>";
-        }
-        oss << " us</td></tr><tr><td width=200 height=30>Scalar C routine takes:</td><td>";
-        if (c_time_weight < 10) {
-            oss << "?";
-        } else {
-            if (!use_halide) oss << "<b>";
-            oss << c_last_t;
-            if (!use_halide) oss << "</b>";
         }
         oss << " us</td></tr></table>";
 
         PostMessage(oss.str());
 
-        graphics.PaintImageData(im2, Point(0, 0));
-
+        graphics.PaintImageData(framebuffer, Point(0, 0));
         graphics.Flush(callback);
-
-        std::swap(im1, im2);
     }
 };
 
 /// The Module class.  The browser calls the CreateInstance() method to create
 /// an instance of your NaCl module on the web page.  The browser creates a new
 /// instance for each <embed> tag with type="application/x-nacl".
-class HelloHalideModule : public Module {
+class HalideDemosModule : public Module {
 public:
-    HelloHalideModule() : Module() {}
-    virtual ~HelloHalideModule() {}
+    HalideDemosModule() : Module() {}
+    virtual ~HalideDemosModule() {}
 
-    /// Create and return a HelloHalideInstance object.
+    /// Create and return a HalideDemosInstance object.
     /// @param[in] instance The browser-side instance.
     /// @return the plugin-side instance.
     virtual Instance* CreateInstance(PP_Instance instance) {
-        return new HelloHalideInstance(instance);
+        return new HalideDemosInstance(instance);
     }
 };
 
@@ -309,6 +349,6 @@ namespace pp {
 /// is one instance per <embed> tag on the page.  This is the main binding
 /// point for your NaCl module with the browser.
 Module* CreateModule() {
-    return new HelloHalideModule();
+    return new HalideDemosModule();
 }
 }  // namespace pp

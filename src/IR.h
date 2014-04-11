@@ -921,20 +921,22 @@ namespace Internal {
 
 /** A union reduction call. */
 struct UnionCall : public ExprNode<UnionCall> {
+    int value_index;
     std::string name;
     std::vector<Expr> args;
     UnionReduction union_op;
 
     // Convenience function
-    static Expr make(const UnionReduction& u, const std::vector<Expr> &args) {
+    static Expr make(const UnionReduction& u, const std::vector<Expr> &args, int idx) {
        for (size_t i = 0; i < args.size(); i++) {
             assert(args[i].defined() && "Call of undefined");
         }
        UnionCall* node = new UnionCall;
-       node->type = u.type();
+       node->type = u.type(idx);
        node->name = u.name();
        node->args = args;
-       node->union_op = u;
+       node->value_index = idx;
+       node->union_op    = u;
        return node;
     }
 };

@@ -7,41 +7,6 @@
 using namespace Halide;
 using namespace Halide::Internal;
 
-std::ostream &operator<<(std::ostream &s, Func f) {
-    if (f.defined()) {
-        std::vector<Var> args = f.args();
-        Expr value = f.value();
-        s << "Func " << f.name() << ";\n";
-        s << f.name() << "(";
-        for (size_t i=0; i<args.size(); i++) {
-            s << args[i];
-            if (i<args.size()-1)
-                s << ",";
-        }
-        s << ") = " << value << ";\n";
-    }
-
-    for (size_t j=0; j<f.num_reduction_definitions(); j++) {
-        for (size_t k=0; k<f.reduction_domain(j).dimensions(); k++) {
-            std::string r = f.reduction_domain(j)[k].name();
-            r.erase(r.find(".x$r"));
-            s << "RDom " << r  << "("
-              << f.reduction_domain(j)[k].min()   << ","
-              << f.reduction_domain(j)[k].extent()<< "); ";
-        }
-        std::vector<Expr> args = f.reduction_args(j);
-        Expr value = f.reduction_value(j);
-        s << f.name() << "(";
-        for (size_t i=0; i<args.size(); i++) {
-            s << args[i];
-            if (i<args.size()-1)
-                s << ",";
-        }
-        s << ") = " << value << ";\n";
-    }
-    return s;
-}
-
 int main() {
     unsigned int width = 20;
     unsigned int tile  = 5;

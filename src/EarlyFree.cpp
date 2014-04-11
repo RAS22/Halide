@@ -1,18 +1,13 @@
+#include <map>
+
 #include "EarlyFree.h"
 #include "IRVisitor.h"
 #include "IRMutator.h"
-#include "Debug.h"
-#include "IRPrinter.h"
-#include "IROperator.h"
-#include "Scope.h"
-#include <map>
 
 namespace Halide {
 namespace Internal {
 
 using std::map;
-using std::pair;
-using std::make_pair;
 using std::string;
 using std::vector;
 
@@ -57,6 +52,13 @@ private:
             last_use = containing_stmt;
         }
         IRVisitor::visit(store);
+    }
+
+    void visit(const Variable *var) {
+        if (starts_with(var->name, func + ".") &&
+            ends_with(var->name, ".buffer")) {
+            last_use = containing_stmt;
+        }
     }
 
     void visit(const Pipeline *pipe) {
@@ -168,7 +170,7 @@ class InjectEarlyFrees : public IRMutator {
             inject_marker.last_use = last_use.last_use;
             stmt = inject_marker.mutate(stmt);
         } else {
-            stmt = Allocate::make(alloc->name, alloc->type, alloc->size,
+            stmt = Allocate::make(alloc->name, alloc->type, alloc->extents,
                                 Block::make(alloc->body, Free::make(alloc->name)));
         }
 

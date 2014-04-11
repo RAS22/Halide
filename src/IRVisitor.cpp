@@ -125,6 +125,17 @@ void IRVisitor::visit(const Call *op) {
     for (size_t i = 0; i < op->args.size(); i++) {
         op->args[i].accept(this);
     }
+
+    // Consider extern call args
+    Function f = op->func;
+    if (op->call_type == Call::Halide && f.has_extern_definition()) {
+        for (size_t i = 0; i < f.extern_arguments().size(); i++) {
+            ExternFuncArgument arg = f.extern_arguments()[i];
+            if (arg.is_expr()) {
+                arg.expr.accept(this);
+            }
+        }
+    }
 }
 
 void IRVisitor::visit(const UnionCall *op) {
@@ -174,7 +185,9 @@ void IRVisitor::visit(const Provide *op) {
 }
 
 void IRVisitor::visit(const Allocate *op) {
-    op->size.accept(this);
+    for (size_t i = 0; i < op->extents.size(); i++) {
+      op->extents[i].accept(this);
+    }
     op->body.accept(this);
 }
 
@@ -395,7 +408,9 @@ void IRGraphVisitor::visit(const Provide *op) {
 }
 
 void IRGraphVisitor::visit(const Allocate *op) {
-    include(op->size);
+    for (size_t i = 0; i < op->extents.size(); i++) {
+        include(op->extents[i]);
+    }
     include(op->body);
 }
 
@@ -429,5 +444,3 @@ void IRGraphVisitor::visit(const Evaluate *op) {
 
 }
 }
-
-

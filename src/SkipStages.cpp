@@ -5,6 +5,7 @@
 #include "Scope.h"
 #include "Simplify.h"
 #include "Substitute.h"
+#include "ExprUsesVar.h"
 
 namespace Halide {
 namespace Internal {
@@ -27,18 +28,23 @@ private:
 
     void visit(const Variable *op) {
         bool this_varies = varying.contains(op->name);
+
         varies |= this_varies;
     }
 
     void visit(const For *op) {
         op->min.accept(this);
+        bool min_varies = varies;
         op->extent.accept(this);
-        if (!is_one(op->extent)) {
+        bool should_pop = false;
+        if (!is_one(op->extent) || min_varies) {
+            should_pop = true;
             varying.push(op->name, 0);
         }
         op->body.accept(this);
-        if (!is_one(op->extent)) {
+        if (should_pop) {
             varying.pop(op->name);
+            assert(!expr_uses_var(predicate, op->name));
         } else {
             predicate = substitute(op->name, op->min, predicate);
         }
@@ -141,6 +147,8 @@ private:
     using IRMutator::visit;
 
     void visit(const Pipeline *op) {
+        // If the predicate at this stage depends on something
+        // vectorized we should bail out.
         if (op->name == buffer) {
             Stmt produce = op->produce, update = op->update;
             if (update.defined()) {
@@ -162,17 +170,61 @@ private:
 
 class StageSkipper : public IRMutator {
 public:
-    StageSkipper(const string &f) : func(f) {}
+    StageSkipper(const string &f) : func(f), in_vector_loop(false) {}
 private:
     string func;
     using IRMutator::visit;
+
+    Scope<int> vector_vars;
+    bool in_vector_loop;
+
+    void visit(const For *op) {
+        bool old_in_vector_loop = in_vector_loop;
+
+        // We want to be sure that the predicate doesn't vectorize.
+        if (op->for_type == For::Vectorized) {
+            vector_vars.push(op->name, 0);
+            in_vector_loop = true;
+        }
+
+        IRMutator::visit(op);
+
+        if (op->for_type == For::Vectorized) {
+            vector_vars.pop(op->name);
+        }
+
+        in_vector_loop = old_in_vector_loop;
+    }
+
+    void visit(const LetStmt *op) {
+        bool should_pop = false;
+        if (in_vector_loop &&
+            expr_uses_vars(op->value, vector_vars)) {
+            should_pop = true;
+            vector_vars.push(op->name, 0);
+        }
+
+        IRMutator::visit(op);
+
+        if (should_pop) {
+            vector_vars.pop(op->name);
+        }
+    }
 
     void visit(const Realize *op) {
         if (op->name == func) {
             PredicateFinder f(op->name);
             op->body.accept(&f);
             Expr predicate = simplify(f.predicate);
-            debug(3) << "Realization " << op->name << " only used when " << predicate << "\n";
+
+            if (expr_uses_vars(predicate, vector_vars)) {
+                // Don't try to skip stages if the predicate may vary
+                // per lane. This will just unvectorize the
+                // production, which is probably contrary to the
+                // intent of the user.
+                predicate = const_true();
+            }
+
             if (!is_one(predicate)) {
                 ProductionGuarder g(op->name, predicate);
                 Stmt body = g.mutate(op->body);

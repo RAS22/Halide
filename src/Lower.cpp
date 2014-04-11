@@ -5,9 +5,9 @@
 
 #include "Lower.h"
 #include "IROperator.h"
+#include "IRMutator.h"
 #include "Substitute.h"
 #include "Function.h"
-#include "Scope.h"
 #include "Bounds.h"
 #include "Simplify.h"
 #include "IRPrinter.h"
@@ -33,6 +33,9 @@
 #include "Inline.h"
 #include "Qualify.h"
 #include "UnifyDuplicateLets.h"
+#include "Func.h"
+#include "ExprUsesVar.h"
+#include "FindCalls.h"
 
 namespace Halide {
 namespace Internal {
@@ -62,33 +65,12 @@ void lower_test() {
     g.store_at(f, y).compute_at(f, x);
     h.store_at(f, y).compute_at(f, y);
 
-    Stmt result = lower(f.function());
+    Stmt result = lower(f.function(), get_host_target());
 
     assert(result.defined() && "Lowering returned trivial function");
 
     std::cout << "Lowering test passed" << std::endl;
 }
-
-class ExprUsesVar : public IRVisitor {
-    using IRVisitor::visit;
-
-    string var;
-
-    void visit(const Variable *v) {
-        if (v->name == var) {
-            result = true;
-        }
-    }
-public:
-    ExprUsesVar(const string &v) : var(v), result(false) {}
-    bool result;
-};
-bool expr_uses_var(Expr e, const string &v) {
-    ExprUsesVar uses(v);
-    e.accept(&uses);
-    return uses.result;
-}
-
 
 namespace {
 // A structure representing a containing LetStmt or For loop. Used in
@@ -350,35 +332,13 @@ Stmt build_produce(Function f) {
             } else if (args[j].is_func()) {
                 Function input(args[j].func);
                 for (int k = 0; k < input.outputs(); k++) {
-                    string name = input.name();
+                    string buf_name = input.name();
                     if (input.outputs() > 1) {
-                        name += "." + int_to_string(k);
+                        buf_name += "." + int_to_string(k);
                     }
-
-                    vector<Expr> top_left;
-                    for (int i = 0; i < input.dimensions(); i++) {
-                        string d = int_to_string(i);
-                        top_left.push_back(Variable::make(Int(32), input.name() + ".min." + d));
-                    }
-                    Expr host_ptr = Call::make(input, top_left, k);
-                    host_ptr = Call::make(Handle(), Call::address_of, vec(host_ptr), Call::Intrinsic);
-
-                    vector<Expr> buffer_args(2);
-                    buffer_args[0] = host_ptr;
-                    buffer_args[1] = input.output_types()[k].bytes();
-                    for (int i = 0; i < input.dimensions(); i++) {
-                        string d = int_to_string(i);
-                        buffer_args.push_back(Variable::make(Int(32), input.name() + ".min." + d));
-                        buffer_args.push_back(Variable::make(Int(32), input.name() + ".extent." + d));
-                        buffer_args.push_back(Variable::make(Int(32), input.name() + ".stride." + d));
-                    }
-
-                    Expr buf = Call::make(Handle(), Call::create_buffer_t,
-                                          buffer_args, Call::Intrinsic);
-
-                    name += ".tmp_buffer";
-                    lets.push_back(make_pair(name, buf));
-                    extern_call_args.push_back(Variable::make(Handle(), name));
+                    buf_name += ".buffer";
+                    Expr buffer = Variable::make(Handle(), buf_name);
+                    extern_call_args.push_back(buffer);
                 }
             } else if (args[j].is_buffer()) {
                 Buffer b = args[j].buffer;
@@ -395,52 +355,72 @@ Stmt build_produce(Function f) {
             }
         }
 
-        // Make the buffer_ts representing the output. They
-        // all use the same size, but have differing types.
-        string stride_name = f.name();
-        if (f.outputs() > 1) {
-            stride_name += ".0";
-        }
-        string stage_name = f.name() + ".s0.";
-
-        for (int j = 0; j < f.outputs(); j++) {
-
-            vector<Expr> buffer_args(2);
-
-            vector<Expr> top_left;
-            for (int k = 0; k < f.dimensions(); k++) {
-                string var = stage_name + f.args()[k];
-                top_left.push_back(Variable::make(Int(32), var + ".min"));
+        // Grab the buffer_ts representing the output. If the store
+        // level matches the compute level, then we can use the ones
+        // already injected by allocation bounds inference. If it's
+        // the output to the pipeline then it will similarly be in the
+        // symbol table.
+        if (f.schedule().store_level == f.schedule().compute_level) {
+            for (int j = 0; j < f.outputs(); j++) {
+                string buf_name = f.name();
+                if (f.outputs() > 1) {
+                    buf_name += "." + int_to_string(j);
+                }
+                buf_name += ".buffer";
+                Expr buffer = Variable::make(Handle(), buf_name);
+                extern_call_args.push_back(buffer);
             }
-            Expr host_ptr = Call::make(f, top_left, j);
-            host_ptr = Call::make(Handle(), Call::address_of, vec(host_ptr), Call::Intrinsic);
-
-            buffer_args[0] = host_ptr;
-            buffer_args[1] = f.output_types()[j].bytes();
-            for (int k = 0; k < f.dimensions(); k++) {
-                string var = stage_name + f.args()[k];
-                Expr min = Variable::make(Int(32), var + ".min");
-                Expr max = Variable::make(Int(32), var + ".max");
-                Expr stride = Variable::make(Int(32), stride_name + ".stride." + int_to_string(k));
-                buffer_args.push_back(min);
-                buffer_args.push_back(max - min + 1);
-                buffer_args.push_back(stride);
+        } else {
+            // Store level doesn't match compute level. Make an output
+            // buffer just for this subregion.
+            string stride_name = f.name();
+            if (f.outputs() > 1) {
+                stride_name += ".0";
             }
+            string stage_name = f.name() + ".s0.";
+            for (int j = 0; j < f.outputs(); j++) {
 
-            Expr output_buffer_t = Call::make(Handle(), Call::create_buffer_t,
-                                              buffer_args, Call::Intrinsic);
+                vector<Expr> buffer_args(2);
 
-            string buf_name = f.name() + "." + int_to_string(j) + ".tmp_buffer";
-            extern_call_args.push_back(Variable::make(Handle(), buf_name));
-            lets.push_back(make_pair(buf_name, output_buffer_t));
+                vector<Expr> top_left;
+                for (int k = 0; k < f.dimensions(); k++) {
+                    string var = stage_name + f.args()[k];
+                    top_left.push_back(Variable::make(Int(32), var + ".min"));
+                }
+                Expr host_ptr = Call::make(f, top_left, j);
+                host_ptr = Call::make(Handle(), Call::address_of, vec(host_ptr), Call::Intrinsic);
+
+                buffer_args[0] = host_ptr;
+                buffer_args[1] = f.output_types()[j].bytes();
+                for (int k = 0; k < f.dimensions(); k++) {
+                    string var = stage_name + f.args()[k];
+                    Expr min = Variable::make(Int(32), var + ".min");
+                    Expr max = Variable::make(Int(32), var + ".max");
+                    Expr stride = Variable::make(Int(32), stride_name + ".stride." + int_to_string(k));
+                    buffer_args.push_back(min);
+                    buffer_args.push_back(max - min + 1);
+                    buffer_args.push_back(stride);
+                }
+
+                Expr output_buffer_t = Call::make(Handle(), Call::create_buffer_t,
+                                                  buffer_args, Call::Intrinsic);
+
+                string buf_name = f.name() + "." + int_to_string(j) + ".tmp_buffer";
+                extern_call_args.push_back(Variable::make(Handle(), buf_name));
+                lets.push_back(make_pair(buf_name, output_buffer_t));
+            }
         }
 
         // Make the extern call
         Expr e = Call::make(Int(32), extern_name,
                             extern_call_args, Call::Extern);
+        string result_name = unique_name('t');
+        Expr result = Variable::make(Int(32), result_name);
         // Check if it succeeded
-        Stmt check = AssertStmt::make(EQ::make(e, 0), "Call to external func " +
-                                      extern_name + " returned non-zero value");
+        Stmt check = AssertStmt::make(EQ::make(result, 0), "Call to external func " +
+                                      extern_name + " returned non-zero value: %d",
+                                      vec<Expr>(result));
+        check = LetStmt::make(result_name, e, check);
 
         for (size_t i = 0; i < lets.size(); i++) {
             check = LetStmt::make(lets[i].first, lets[i].second, check);
@@ -526,11 +506,9 @@ pair<Stmt, Stmt> build_production(Function func) {
 }
 
 // A schedule may include explicit bounds on some dimension. This
-// injects let statements that set those bounds, and assertions that
-// check that those bounds are sufficiently large to cover the
-// inferred bounds required.
+// injects assertions that check that those bounds are sufficiently
+// large to cover the inferred bounds required.
 Stmt inject_explicit_bounds(Stmt body, Function func) {
-    // Inject any explicit bounds
     const Schedule &s = func.schedule();
     for (size_t stage = 0; stage <= func.reductions().size(); stage++) {
         for (size_t i = 0; i < s.bounds.size(); i++) {
@@ -543,20 +521,22 @@ Stmt inject_explicit_bounds(Stmt body, Function func) {
             Expr min_var = Variable::make(Int(32), min_name);
             Expr max_var = Variable::make(Int(32), max_name);
             Expr check = (min_val <= min_var) && (max_val >= max_var);
-            string error_msg = "Bounds given for " + b.var + " in " + func.name() + " don't cover required region";
+            string error_msg = ("Bounds given for " + b.var + " in " + func.name() +
+                                " (from %d to %d) don't cover required region (from %d to %d)");
+            vector<Expr> args = vec<Expr>(min_val, max_val, min_var, max_var);
 
             // bounds inference has already respected these values for us
             //body = LetStmt::make(prefix + ".min", min_val, body);
             //body = LetStmt::make(prefix + ".max", max_val, body);
 
-            body = Block::make(AssertStmt::make(check, error_msg), body);
+            body = Block::make(AssertStmt::make(check, error_msg, args), body);
         }
     }
 
     return body;
 }
 
-class IsCalledInStmt : public IRVisitor {
+class IsUsedInStmt : public IRVisitor {
     string func;
 
     using IRVisitor::visit;
@@ -566,15 +546,24 @@ class IsCalledInStmt : public IRVisitor {
         if (op->name == func) result = true;
     }
 
+    // A reference to the function's buffers counts as a use
+    void visit(const Variable *op) {
+        if (op->type == Handle() &&
+            starts_with(op->name, func + ".") &&
+            ends_with(op->name, ".buffer")) {
+            result = true;
+        }
+    }
+
 public:
     bool result;
-    IsCalledInStmt(Function f) : func(f.name()), result(false) {
+    IsUsedInStmt(Function f) : func(f.name()), result(false) {
     }
 
 };
 
-bool function_is_called_in_stmt(Function f, Stmt s) {
-    IsCalledInStmt is_called(f);
+bool function_is_used_in_stmt(Function f, Stmt s) {
+    IsUsedInStmt is_called(f);
     s.accept(&is_called);
     return is_called.result;
 }
@@ -585,9 +574,10 @@ class InjectRealization : public IRMutator {
 public:
     const Function &func;
     bool found_store_level, found_compute_level;
+    const Target &target;
 
-    InjectRealization(const Function &f) :
-        func(f), found_store_level(false), found_compute_level(false) {}
+    InjectRealization(const Function &f, const Target &t) :
+        func(f), found_store_level(false), found_compute_level(false), target(t) {}
 private:
 
     string producing;
@@ -611,7 +601,11 @@ private:
 
         // This is also the point at which we inject explicit bounds
         // for this realization.
-        return inject_explicit_bounds(s, func);
+        if (target.features & Target::NoAsserts) {
+            return s;
+        } else {
+            return inject_explicit_bounds(s, func);
+        }
     }
 
     using IRMutator::visit;
@@ -654,7 +648,7 @@ private:
         if (func.has_extern_definition() &&
             func.schedule().compute_level.is_inline() &&
             for_loop->for_type == For::Vectorized &&
-            function_is_called_in_stmt(func, for_loop)) {
+            function_is_used_in_stmt(func, for_loop)) {
 
             // If we're trying to inline an extern function, schedule it here and bail out
             debug(2) << "Injecting realization of " << func.name() << " around node " << Stmt(for_loop) << "\n";
@@ -667,7 +661,7 @@ private:
 
         if (compute_level.match(for_loop->name)) {
             debug(3) << "Found compute level\n";
-            if (function_is_called_in_stmt(func, body)) {
+            if (function_is_used_in_stmt(func, body)) {
                 body = build_pipeline(body);
             }
             found_compute_level = true;
@@ -678,7 +672,7 @@ private:
             assert(found_compute_level &&
                    "The compute loop level was not found within the store loop level!");
 
-            if (function_is_called_in_stmt(func, body)) {
+            if (function_is_used_in_stmt(func, body)) {
                 body = build_realize(body);
             }
 
@@ -706,7 +700,7 @@ private:
         if (op->name != func.name() &&
             !func.is_pure() &&
             func.schedule().compute_level.is_inline() &&
-            function_is_called_in_stmt(func, op)) {
+            function_is_used_in_stmt(func, op)) {
 
             // Prefix all calls to func in op
             stmt = build_realize(build_pipeline(op));
@@ -714,34 +708,6 @@ private:
         } else {
             stmt = op;
         }
-    }
-};
-
-/* Find all the internal halide calls in an expr */
-class FindCalls : public IRVisitor {
-public:
-    map<string, Function> calls;
-
-    using IRVisitor::visit;
-
-    void include_function(Function f) {
-        map<string, Function>::iterator iter = calls.find(f.name());
-        if (iter == calls.end()) {
-            calls[f.name()] = f;
-        } else {
-            assert(iter->second.same_as(f) &&
-                   "Can't compile a pipeline using multiple functions with same name");
-        }
-    }
-
-    void visit(const Call *call) {
-        IRVisitor::visit(call);
-
-        if (call->call_type == Call::Halide) {
-            Function f = call->func;
-            include_function(f);
-        }
-
     }
 };
 
@@ -792,68 +758,12 @@ public:
     }
 };
 
-void populate_environment(Function f, map<string, Function> &env, bool recursive = true) {
-    map<string, Function>::const_iterator iter = env.find(f.name());
-    if (iter != env.end()) {
-        assert(iter->second.same_as(f) &&
-               "Can't compile a pipeline using multiple functions with same name");
-        return;
-    }
-
-    FindCalls calls;
-    for (size_t i = 0; i < f.values().size(); i++) {
-        f.values()[i].accept(&calls);
-    }
-
-    // Consider reductions
-    for (size_t j = 0; j < f.reductions().size(); j++) {
-        ReductionDefinition r = f.reductions()[j];
-        for (size_t i = 0; i < r.values.size(); i++) {
-            r.values[i].accept(&calls);
-        }
-        for (size_t i = 0; i < r.args.size(); i++) {
-            r.args[i].accept(&calls);
-        }
-
-        ReductionDomain d = r.domain;
-        if (r.domain.defined()) {
-            for (size_t i = 0; i < d.domain().size(); i++) {
-                d.domain()[i].min.accept(&calls);
-                d.domain()[i].extent.accept(&calls);
-            }
-        }
-    }
-
-    // Consider extern calls
-    if (f.has_extern_definition()) {
-        for (size_t i = 0; i < f.extern_arguments().size(); i++) {
-            ExternFuncArgument arg = f.extern_arguments()[i];
-            if (arg.is_func()) {
-                Function g(arg.func);
-                calls.calls[g.name()] = g;
-            }
-        }
-    }
-
-    if (!recursive) {
-        env.insert(calls.calls.begin(), calls.calls.end());
-    } else {
-        env[f.name()] = f;
-
-        for (map<string, Function>::const_iterator iter = calls.calls.begin();
-             iter != calls.calls.end(); ++iter) {
-            populate_environment(iter->second, env);
-        }
-    }
-}
-
 vector<string> realization_order(string output, const map<string, Function> &env, map<string, set<string> > &graph) {
     // Make a DAG representing the pipeline. Each function maps to the set describing its inputs.
     // Populate the graph
     for (map<string, Function>::const_iterator iter = env.begin();
          iter != env.end(); ++iter) {
-        map<string, Function> calls;
-        populate_environment(iter->second, calls, false);
+        map<string, Function> calls = find_direct_calls(iter->second);
 
         for (map<string, Function>::const_iterator j = calls.begin();
              j != calls.end(); ++j) {
@@ -898,13 +808,17 @@ vector<string> realization_order(string output, const map<string, Function> &env
 
 }
 
-Stmt create_initial_loop_nest(Function f) {
+Stmt create_initial_loop_nest(Function f, const Target &t) {
     // Generate initial loop nest
     pair<Stmt, Stmt> r = build_production(f);
     Stmt s = r.first;
     // This must be in a pipeline so that bounds inference understands the update step
-    s = Pipeline::make(f.name(), r.first, r.second, AssertStmt::make(const_true(), "Dummy consume step"));
-    return inject_explicit_bounds(s, f);
+    s = Pipeline::make(f.name(), r.first, r.second, Evaluate::make(0));
+    if (t.features & Target::NoAsserts) {
+        return s;
+    } else {
+        return inject_explicit_bounds(s, f);
+    }
 }
 
 class ComputeLegalSchedules : public IRVisitor {
@@ -933,23 +847,34 @@ private:
         loops.pop_back();
     }
 
+    void register_use() {
+        if (!found) {
+            found = true;
+            loops_allowed = loops;
+        } else {
+            // Take the common prefix between loops and loops allowed
+            for (size_t i = 0; i < loops_allowed.size(); i++) {
+                if (i >= loops.size() || !loops[i].match(loops_allowed[i])) {
+                    loops_allowed.resize(i);
+                    break;
+                }
+            }
+        }
+    }
+
     void visit(const Call *c) {
         IRVisitor::visit(c);
 
         if (c->name == func.name()) {
+            register_use();
+        }
+    }
 
-            if (!found) {
-                found = true;
-                loops_allowed = loops;
-            } else {
-                // Take the common prefix between loops and loops allowed
-                for (size_t i = 0; i < loops_allowed.size(); i++) {
-                    if (i >= loops.size() || !loops[i].match(loops_allowed[i])) {
-                        loops_allowed.resize(i);
-                        break;
-                    }
-                }
-            }
+    void visit(const Variable *v) {
+        if (v->type == Handle() &&
+            starts_with(v->name, func.name() + ".") &&
+            ends_with(v->name, ".buffer")) {
+            register_use();
         }
     }
 };
@@ -992,6 +917,27 @@ void validate_schedule(Function f, Stmt s, bool is_output) {
                               << "because it is used in the externally-computed function " << f.name() << "\n";
                     assert(false);
                 }
+            }
+        }
+    }
+
+    // Emit a warning if only some of the steps have been scheduled.
+    bool any_scheduled = f.schedule().touched;
+    for (size_t i = 0; i < f.reductions().size(); i++) {
+        const ReductionDefinition &r = f.reductions()[i];
+        any_scheduled = any_scheduled || r.schedule.touched;
+    }
+    if (any_scheduled) {
+        for (size_t i = 0; i < f.reductions().size(); i++) {
+            const ReductionDefinition &r = f.reductions()[i];
+            if (!r.schedule.touched) {
+                std::cerr << "Warning: Update step " << i
+                          << " of function " << f.name()
+                          << " has not been scheduled, even though some other"
+                          << " steps have been. You may have forgotten to"
+                          << " schedule it. If this was intentional, call "
+                          << f.name() << ".update(" << i << ") to suppress"
+                          << " this warning.\n";
             }
         }
     }
@@ -1080,7 +1026,7 @@ void validate_schedule(Function f, Stmt s, bool is_output) {
 
 Stmt schedule_functions(Stmt s, const vector<string> &order,
                         const map<string, Function> &env,
-                        const map<string, set<string> > &graph) {
+                        const map<string, set<string> > &graph, const Target &t) {
 
     // Inject a loop over root to give us a scheduling point
     string root_var = Schedule::LoopLevel::root().func + "." + Schedule::LoopLevel::root().var;
@@ -1101,7 +1047,7 @@ Stmt schedule_functions(Stmt s, const vector<string> &order,
             s = inline_function(s, f);
         } else {
             debug(1) << "Injecting realization of " << order[i-1] << '\n';
-            InjectRealization injector(f);
+            InjectRealization injector(f, t);
             s = injector.mutate(s);
             assert(injector.found_store_level && injector.found_compute_level);
         }
@@ -1117,7 +1063,7 @@ Stmt schedule_functions(Stmt s, const vector<string> &order,
 
 // Insert checks to make sure that parameters are within their
 // declared range.
-Stmt add_parameter_checks(Stmt s) {
+Stmt add_parameter_checks(Stmt s, const Target &t) {
     // First, find all the parameters
     FindParameters finder;
     s.accept(&finder);
@@ -1164,11 +1110,15 @@ Stmt add_parameter_checks(Stmt s) {
         s = LetStmt::make(lets[i].first, lets[i].second, s);
     }
 
+    if (t.features & Target::NoAsserts) {
+        asserts.clear();
+    }
+
     // Inject the assert statements
     for (size_t i = 0; i < asserts.size(); i++) {
         std::ostringstream oss;
         oss << "Static bounds constraint on parameter violated: " << asserts[i];
-        s = Block::make(AssertStmt::make(asserts[i], oss.str()), s);
+        s = Block::make(AssertStmt::make(asserts[i], oss.str(), vector<Expr>()), s);
     }
 
     return s;
@@ -1182,7 +1132,10 @@ Stmt add_parameter_checks(Stmt s) {
 // inserted. The second is a piece of code which will rewrite the
 // buffer_t sizes, mins, and strides in order to satisfy the
 // requirements.
-Stmt add_image_checks(Stmt s, Function f) {
+Stmt add_image_checks(Stmt s, Function f, const Target &t, const FuncValueBounds &fb) {
+
+    bool no_asserts = t.features & Target::NoAsserts;
+    bool no_bounds_query = t.features & Target::NoBoundsQuery;
 
     // First hunt for all the referenced buffers
     FindBuffers finder;
@@ -1202,13 +1155,15 @@ Stmt add_image_checks(Stmt s, Function f) {
         }
     }
 
-    map<string, Box> boxes = boxes_touched(s);
+    map<string, Box> boxes = boxes_touched(s, Scope<Interval>(), fb);
 
     // Now iterate through all the buffers, creating a list of lets
     // and a list of asserts.
+    vector<pair<string, Expr> > lets_overflow;
     vector<pair<string, Expr> > lets_required;
     vector<pair<string, Expr> > lets_constrained;
     vector<pair<string, Expr> > lets_proposed;
+    vector<Stmt> dims_no_overflow_asserts;
     vector<Stmt> asserts_required;
     vector<Stmt> asserts_constrained;
     vector<Stmt> asserts_proposed;
@@ -1292,8 +1247,9 @@ Stmt add_image_checks(Stmt s, Function f) {
             int correct_size = type.bytes();
             ostringstream error_msg;
             error_msg << error_name << " has type " << type
-                      << ", but elem_size of the buffer_t passed in is not " << correct_size;
-            asserts_elem_size.push_back(AssertStmt::make(elem_size == correct_size, error_msg.str()));
+                      << ", but elem_size of the buffer_t passed in is "
+                      << "%d instead of " << correct_size;
+            asserts_elem_size.push_back(AssertStmt::make(elem_size == correct_size, error_msg.str(), vec<Expr>(elem_size)));
         }
 
         // Check that the region passed in (after applying constraints) is within the region used
@@ -1303,8 +1259,10 @@ Stmt add_image_checks(Stmt s, Function f) {
             string dim = int_to_string(j);
             string actual_min_name = name + ".min." + dim;
             string actual_extent_name = name + ".extent." + dim;
+            string actual_stride_name = name + ".stride." + dim;
             Expr actual_min = Variable::make(Int(32), actual_min_name);
             Expr actual_extent = Variable::make(Int(32), actual_extent_name);
+            Expr actual_stride = Variable::make(Int(32), actual_stride_name);
             if (!touched[j].min.defined() || !touched[j].max.defined()) {
                 std::cerr << "Error: buffer " << name
                           << " may be accessed in an unbounded way in dimension "
@@ -1314,8 +1272,8 @@ Stmt add_image_checks(Stmt s, Function f) {
 
             Expr min_required = touched[j].min;
             Expr extent_required = touched[j].max + 1 - touched[j].min;
-            string error_msg_extent = error_name + " is accessed beyond the extent in dimension " + dim;
-            string error_msg_min = error_name + " is accessed before the min in dimension " + dim;
+            string error_msg_extent = error_name + " is accessed at %d, which is beyond the max (%d) in dimension " + dim;
+            string error_msg_min = error_name + " is accessed at %d, which before the min (%d) in dimension " + dim;
 
             string min_required_name = name + ".min." + dim + ".required";
             string extent_required_name = name + ".extent." + dim + ".required";
@@ -1326,9 +1284,13 @@ Stmt add_image_checks(Stmt s, Function f) {
             lets_required.push_back(make_pair(extent_required_name, extent_required));
             lets_required.push_back(make_pair(min_required_name, min_required));
 
-            asserts_required.push_back(AssertStmt::make(actual_min <= min_required_var, error_msg_min));
-            asserts_required.push_back(AssertStmt::make(actual_min + actual_extent >=
-                                                        min_required_var + extent_required_var, error_msg_extent));
+            asserts_required.push_back(AssertStmt::make(actual_min <= min_required_var, error_msg_min,
+                                                        vec<Expr>(min_required_var, actual_min)));
+            Expr actual_max = actual_min + actual_extent - 1;
+            Expr max_required = min_required_var + extent_required_var - 1;
+            asserts_required.push_back(AssertStmt::make(actual_max >= max_required,
+                                                        error_msg_extent,
+                                                        vec<Expr>(max_required, actual_max)));
 
             // Come up with a required stride to use in bounds
             // inference mode. We don't assert it. It's just used to
@@ -1345,6 +1307,36 @@ Stmt add_image_checks(Stmt s, Function f) {
                                    Variable::make(Int(32), name + ".extent." + last_dim + ".required"));
             }
             lets_required.push_back(make_pair(name + ".stride." + dim + ".required", stride_required));
+
+            // Insert checks to make sure the total size of all input
+            // and output buffers is <= 2^31 - 1.  And that no product
+            // of extents overflows 2^31 - 1. This second test is
+            // likely only needed if a fuse directive is used in the
+            // schedule to combine multiple extents, but it is here
+            // for extra safety. Ultimately we will want to make
+            // Halide handle larger single buffers, at least on 64-bit
+            // systems.
+            Expr max_size = cast<int64_t>(1) << 31 - 1;
+            Stmt check = AssertStmt::make((cast<int64_t>(actual_extent) * actual_stride) <= max_size,
+                                          "Total allocation for buffer " + name + " exceeds 2^31 - 1",
+                                          std::vector<Expr>());
+            dims_no_overflow_asserts.push_back(check);
+
+            // Don't repeat extents check for secondary buffers as extents must be the same as for the first one.
+            if (!is_secondary_output_buffer) {
+                if (j == 0) {
+                    lets_overflow.push_back(make_pair(name + ".total_extent." + dim, cast<int64_t>(actual_extent)));
+                } else {
+                    Expr last_dim = Variable::make(Int(64), name + ".total_extent." + int_to_string(j-1));
+                    Expr this_dim = actual_extent * last_dim;
+                    Expr this_dim_var = Variable::make(Int(64), name + ".total_extent." + dim);
+                    lets_overflow.push_back(make_pair(name + ".total_extent." + dim, this_dim));
+                    Stmt check = AssertStmt::make(this_dim_var <= max_size,
+                                                  "Product of extents for buffer " + name +
+                                                  " exceeds 2^31 - 1", std::vector<Expr>());
+                    dims_no_overflow_asserts.push_back(check);
+                }
+            }
         }
 
         // Create code that mutates the input buffers if we're in bounds inference mode.
@@ -1445,11 +1437,11 @@ Stmt add_image_checks(Stmt s, Function f) {
                           (min_proposed + extent_proposed >=
                            min_required + extent_required));
             string error = "Applying the constraints to the required region made it smaller";
-            asserts_proposed.push_back(AssertStmt::make((!inference_mode) || check, error));
+            asserts_proposed.push_back(AssertStmt::make((!inference_mode) || check, error, vector<Expr>()));
 
             check = (stride_proposed >= stride_required);
             error = "Applying the constraints to the required stride made it smaller";
-            asserts_proposed.push_back(AssertStmt::make((!inference_mode) || check, error));
+            asserts_proposed.push_back(AssertStmt::make((!inference_mode) || check, error, vector<Expr>()));
         }
 
         // Assert all the conditions, and set the new values
@@ -1465,7 +1457,19 @@ Stmt add_image_checks(Stmt s, Function f) {
             lets_constrained.push_back(make_pair(constraints[i].first + ".constrained", value));
 
             // Check the var passed in equals the constrained version (when not in inference mode)
-            asserts_constrained.push_back(AssertStmt::make(var == constrained_var, error.str()));
+            asserts_constrained.push_back(AssertStmt::make(var == constrained_var, error.str(), vector<Expr>()));
+        }
+    }
+
+    // Inject the code that checks that no dimension math overflows
+    if (!no_asserts) {
+        for (size_t i = dims_no_overflow_asserts.size(); i > 0; i--) {
+            s = Block::make(dims_no_overflow_asserts[i-1], s);
+        }
+
+        // Inject the code that defines the proposed sizes.
+        for (size_t i = lets_overflow.size(); i > 0; i--) {
+            s = LetStmt::make(lets_overflow[i-1].first, lets_overflow[i-1].second, s);
         }
     }
 
@@ -1479,32 +1483,38 @@ Stmt add_image_checks(Stmt s, Function f) {
     // all in reverse order compared to execution, as we incrementally
     // prepending code.
 
-    // Inject the code that checks the constraints are correct.
-    for (size_t i = asserts_constrained.size(); i > 0; i--) {
-        s = Block::make(asserts_constrained[i-1], s);
-    }
+    if (!no_asserts) {
+        // Inject the code that checks the constraints are correct.
+        for (size_t i = asserts_constrained.size(); i > 0; i--) {
+            s = Block::make(asserts_constrained[i-1], s);
+        }
 
-    // Inject the code that checks for out-of-bounds access to the buffers.
-    for (size_t i = asserts_required.size(); i > 0; i--) {
-        s = Block::make(asserts_required[i-1], s);
-    }
+        // Inject the code that checks for out-of-bounds access to the buffers.
+        for (size_t i = asserts_required.size(); i > 0; i--) {
+            s = Block::make(asserts_required[i-1], s);
+        }
 
-    // Inject the code that checks that elem_sizes are ok.
-    for (size_t i = asserts_elem_size.size(); i > 0; i--) {
-        s = Block::make(asserts_elem_size[i-1], s);
+        // Inject the code that checks that elem_sizes are ok.
+        for (size_t i = asserts_elem_size.size(); i > 0; i--) {
+            s = Block::make(asserts_elem_size[i-1], s);
+        }
     }
 
     // Inject the code that returns early for inference mode.
-    s = IfThenElse::make(!maybe_return_condition, s);
+    if (!no_bounds_query) {
+        s = IfThenElse::make(!maybe_return_condition, s);
 
-    // Inject the code that does the buffer rewrites for inference mode.
-    for (size_t i = buffer_rewrites.size(); i > 0; i--) {
-        s = Block::make(buffer_rewrites[i-1], s);
+        // Inject the code that does the buffer rewrites for inference mode.
+        for (size_t i = buffer_rewrites.size(); i > 0; i--) {
+            s = Block::make(buffer_rewrites[i-1], s);
+        }
     }
 
-    // Inject the code that checks the proposed sizes still pass the bounds checks
-    for (size_t i = asserts_proposed.size(); i > 0; i--) {
-        s = Block::make(asserts_proposed[i-1], s);
+    if (!no_asserts) {
+        // Inject the code that checks the proposed sizes still pass the bounds checks
+        for (size_t i = asserts_proposed.size(); i > 0; i--) {
+            s = Block::make(asserts_proposed[i-1], s);
+        }
     }
 
     // Inject the code that defines the proposed sizes.
@@ -1525,19 +1535,18 @@ Stmt add_image_checks(Stmt s, Function f) {
     return s;
 }
 
-Stmt lower(Function f) {
+Stmt lower(Function f, const Target &t) {
 
     // Compute an environment
-    map<string, Function> env;
-    populate_environment(f, env);
+    map<string, Function> env = find_transitive_calls(f);
 
     // Compute a realization order
     map<string, set<string> > graph;
     vector<string> order = realization_order(f.name(), env, graph);
-    Stmt s = create_initial_loop_nest(f);
+    Stmt s = create_initial_loop_nest(f, t);
 
     debug(2) << "Initial statement: " << '\n' << s << '\n';
-    s = schedule_functions(s, order, env, graph);
+    s = schedule_functions(s, order, env, graph, t);
     debug(2) << "All realizations injected:\n" << s << '\n';
 
     debug(1) << "Injecting tracing...\n";
@@ -1549,20 +1558,25 @@ Stmt lower(Function f) {
     debug(2) << "Profiling injected:\n" << s << '\n';
 
     debug(1) << "Adding checks for parameters\n";
-    s = add_parameter_checks(s);
+    s = add_parameter_checks(s, t);
     debug(2) << "Parameter checks injected:\n" << s << '\n';
+
+    // Compute the maximum and minimum possible value of each
+    // function. Used in later bounds inference passes.
+    debug(1) << "Computing bounds of each function's value\n";
+    FuncValueBounds func_bounds = compute_function_value_bounds(order, env);
 
     // The checks will be in terms of the symbols defined by bounds
     // inference.
     debug(1) << "Adding checks for images\n";
-    s = add_image_checks(s, f);
+    s = add_image_checks(s, f, t, func_bounds);
     debug(2) << "Image checks injected:\n" << s << '\n';
 
     // This pass injects nested definitions of variable names, so we
     // can't simplify statements from here until we fix them up. (We
     // can still simplify Exprs).
     debug(1) << "Performing computation bounds inference...\n";
-    s = bounds_inference(s, order, env);
+    s = bounds_inference(s, order, env, func_bounds);
     debug(2) << "Computation bounds inference:\n" << s << '\n';
 
     debug(1) << "Performing sliding window optimization...\n";
@@ -1570,7 +1584,7 @@ Stmt lower(Function f) {
     debug(2) << "Sliding window:\n" << s << '\n';
 
     debug(1) << "Performing allocation bounds inference...\n";
-    s = allocation_bounds_inference(s, env);
+    s = allocation_bounds_inference(s, env, func_bounds);
     debug(2) << "Allocation bounds inference:\n" << s << '\n';
 
     // This uniquifies the variable names, so we're good to simplify
@@ -1602,7 +1616,7 @@ Stmt lower(Function f) {
 
     debug(1) << "Removing code that depends on undef values...\n";
     s = remove_undef(s);
-    debug(2) << "Removed code that depends on undef values: \n" << s << "\n\n;";
+    debug(2) << "Removed code that depends on undef values: \n" << s << "\n\n";
 
     debug(1) << "Simplifying...\n";
     s = simplify(s);

@@ -1,9 +1,9 @@
+#include <iostream>
+#include <sstream>
+
 #include "IRPrinter.h"
 #include "IROperator.h"
 #include "IR.h"
-
-#include <iostream>
-#include <sstream>
 
 namespace Halide {
 
@@ -60,17 +60,17 @@ void IRPrinter::test() {
     Stmt store2 = Store::make("out", call + 1, x);
     Stmt for_loop2 = For::make("x", 0, y, For::Vectorized , store2);
     Stmt pipeline = Pipeline::make("buf", for_loop, Stmt(), for_loop2);
-    Stmt assertion = AssertStmt::make(y > 3, "y is greater than 3");
+    Stmt assertion = AssertStmt::make(y > 3, "y is greater than %d", vec<Expr>(3));
     Stmt block = Block::make(assertion, pipeline);
     Stmt let_stmt = LetStmt::make("y", 17, block);
-    Stmt allocate = Allocate::make("buf", f32, 1023, let_stmt);
+    Stmt allocate = Allocate::make("buf", f32, vec(Expr(1023)), let_stmt);
 
     ostringstream source;
     source << allocate;
     std::string correct_source = \
         "allocate buf[float32 * 1023]\n"
         "let y = 17\n"
-        "assert((y > 3), \"y is greater than 3\")\n"
+        "assert((y > 3), \"y is greater than %d\", 3)\n"
         "produce buf {\n"
         "  parallel (x, -2, (y + 2)) {\n"
         "    buf[(y - 1)] = ((x*17)/(x - 3))\n"
@@ -342,6 +342,19 @@ void IRPrinter::visit(const Broadcast *op) {
 }
 
 void IRPrinter::visit(const Call *op) {
+    // Special-case some intrinsics for readability
+    if (op->call_type == Call::Intrinsic) {
+        if (op->name == Call::extract_buffer_min) {
+            print(op->args[0]);
+            stream << ".min[" << op->args[1] << "]";
+            return;
+        } else if (op->name == Call::extract_buffer_extent) {
+            print(op->args[0]);
+            stream << ".extent[" << op->args[1] << "]";
+            return;
+        }
+    }
+
     stream << op->name << "(";
     for (size_t i = 0; i < op->args.size(); i++) {
         print(op->args[i]);
@@ -384,7 +397,12 @@ void IRPrinter::visit(const AssertStmt *op) {
     do_indent();
     stream << "assert(";
     print(op->condition);
-    stream << ", \"" << op->message << "\")\n";
+    stream << ", " << '"' << op->message << '"';
+    for (size_t i = 0; i < op->args.size(); i++) {
+        stream << ", ";
+        print(op->args[i]);
+    }
+    stream << ")\n";
 }
 
 void IRPrinter::visit(const Pipeline *op) {
@@ -462,8 +480,11 @@ void IRPrinter::visit(const Provide *op) {
 
 void IRPrinter::visit(const Allocate *op) {
     do_indent();
-    stream << "allocate " << op->name << "[" << op->type << " * ";
-    print(op->size);
+    stream << "allocate " << op->name << "[" << op->type;
+    for (size_t i = 0; i < op->extents.size(); i++) {
+        stream  << " * ";
+        print(op->extents[i]);
+    }
     stream << "]\n";
     print(op->body);
 }

@@ -58,6 +58,11 @@ struct Schedule {
                      ends_with(other.var, "." + var)));
         }
 
+        /** Check if two loop levels are exactly the same. */
+        bool operator==(const LoopLevel &other) const {
+            return func == other.func && var == other.var;
+        }
+
     };
 
     /** At what sites should we inject the allocation and the
@@ -107,6 +112,13 @@ struct Schedule {
      * used, what the splits are, and any optional bounds in the list below. */
     std::vector<Dim> dims;
 
+    /** This flag is set to true if the dims list has been manipulated
+     * by the user (or if a ScheduleHandle was created that could have
+     * been used to manipulate it). It controls the warning that
+     * occurs if you schedule the vars of the pure step but not the
+     * update steps. */
+    bool touched;
+
     /** The list and order of dimensions used to store this
      * function. The first dimension in the vector corresponds to the
      * innermost dimension for storage (i.e. which dimension is
@@ -118,8 +130,11 @@ struct Schedule {
         Expr min, extent;
     };
     /** You may explicitly bound some of the dimensions of a
-     * function. See \ref ScheduleHandle::bound */
+     * function. See \ref Func::bound */
     std::vector<Bound> bounds;
+
+
+    Schedule() : touched(false) {};
 };
 
 }

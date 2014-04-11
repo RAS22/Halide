@@ -1,15 +1,9 @@
 #include "CodeGen_SPIR_Dev.h"
+#include "CodeGen_Internal.h"
 #include "IROperator.h"
-#include <iostream>
-#include "buffer_t.h"
 #include "IRPrinter.h"
-#include "IRMatch.h"
 #include "Debug.h"
-#include "Util.h"
-#include "Var.h"
-#include "Param.h"
 #include "Target.h"
-#include "integer_division_table.h"
 #include "LLVM_Headers.h"
 
 namespace Halide {
@@ -20,7 +14,7 @@ using std::string;
 
 using namespace llvm;
 
-CodeGen_SPIR_Dev::CodeGen_SPIR_Dev(int bits) : CodeGen(), bits(bits) {
+CodeGen_SPIR_Dev::CodeGen_SPIR_Dev(Target host, int bits) : CodeGen(host), bits(bits) {
     #if !(WITH_SPIR)
     assert(false && "spir not enabled for this build of Halide.");
     #endif
@@ -65,14 +59,14 @@ void CodeGen_SPIR_Dev::add_kernel(Stmt stmt, std::string name, const std::vector
     // Make the initial basic block
     entry_block = BasicBlock::Create(*context, "entry", function);
     builder->SetInsertPoint(entry_block);
-    
+
     vector<Value *> kernel_arg_address_space = init_kernel_metadata(*context, "kernel_arg_addr_space");
     vector<Value *> kernel_arg_access_qual = init_kernel_metadata(*context, "kernel_arg_access_qual");
     vector<Value *> kernel_arg_type = init_kernel_metadata(*context, "kernel_arg_type");
     vector<Value *> kernel_arg_base_type = init_kernel_metadata(*context, "kernel_arg_base_type");
     vector<Value *> kernel_arg_type_qual = init_kernel_metadata(*context, "kernel_arg_type_qual");
     vector<Value *> kernel_arg_name = init_kernel_metadata(*context, "kernel_arg_name");
-    
+
     // Put the arguments in the symbol table
     {
         llvm::Function::arg_iterator arg = function->arg_begin();
@@ -84,7 +78,7 @@ void CodeGen_SPIR_Dev::add_kernel(Stmt stmt, std::string name, const std::vector
                 // address 'foo.host', so we store the device pointer
                 // as foo.host in this scope.
                 sym_push(iter->name + ".host", arg);
-                
+
                 kernel_arg_address_space.push_back(ConstantInt::get(i32, 1));
             } else {
                 sym_push(iter->name, arg);
@@ -103,6 +97,7 @@ void CodeGen_SPIR_Dev::add_kernel(Stmt stmt, std::string name, const std::vector
             kernel_arg_base_type.push_back(MDString::get(*context, "type"));
         }
         arg->setName("shared");
+        shared_mem = arg;
 
         kernel_arg_address_space.push_back(ConstantInt::get(i32, 3)); // __local = addrspace(3)
         kernel_arg_name.push_back(MDString::get(*context, "shared"));
@@ -133,11 +128,11 @@ void CodeGen_SPIR_Dev::add_kernel(Stmt stmt, std::string name, const std::vector
     // Add the nvvm annotation that it is a kernel function.
     Value *kernel_metadata[] =
     {
-        function, 
-        MDNode::get(*context, kernel_arg_address_space), 
-        MDNode::get(*context, kernel_arg_access_qual), 
-        MDNode::get(*context, kernel_arg_type), 
-        MDNode::get(*context, kernel_arg_type_qual), 
+        function,
+        MDNode::get(*context, kernel_arg_address_space),
+        MDNode::get(*context, kernel_arg_access_qual),
+        MDNode::get(*context, kernel_arg_type),
+        MDNode::get(*context, kernel_arg_type_qual),
         MDNode::get(*context, kernel_arg_name)
     };
     MDNode *mdNode = MDNode::get(*context, kernel_metadata);
@@ -254,19 +249,26 @@ void CodeGen_SPIR_Dev::visit(const Allocate *alloc) {
 
     if (offset) {
         // Bit-cast it to a shared memory pointer (address-space 3 is shared memory)
-        ptr = builder->CreateIntToPtr(offset, PointerType::get(llvm_type, 3));
+        //ptr = builder->CreateIntToPtr(offset, PointerType::get(llvm_type, 3));
+        if (bits == 64) {
+            llvm::Type *i64 = llvm::Type::getInt64Ty(*context);
+            offset = builder->CreateIntCast(offset, i64, false);
+        }
+        ptr = builder->CreateInBoundsGEP(shared_mem, offset);
+        ptr = builder->CreatePointerCast(ptr, PointerType::get(llvm_type, 3));
     } else {
         // Otherwise jump back to the entry and generate an
         // alloca. Note that by jumping back we're rendering any
         // expression we carry back meaningless, so we had better only
         // be dealing with constants here.
-        const IntImm *size = alloc->size.as<IntImm>();
-        assert(size && "Only fixed-size allocations are supported on the gpu. Try storing into shared memory instead.");
+        int32_t size = 0;
+        bool is_constant = constant_allocation_size(alloc->extents, allocation_name, size);
+        assert(is_constant && "Only fixed-size allocations are supported on the gpu. Try storing into shared memory instead.");
 
         BasicBlock *here = builder->GetInsertBlock();
 
         builder->SetInsertPoint(entry_block);
-        ptr = builder->CreateAlloca(llvm_type_of(alloc->type), ConstantInt::get(i32, size->value));
+        ptr = builder->CreateAlloca(llvm_type_of(alloc->type), ConstantInt::get(i32, size));
         builder->SetInsertPoint(here);
     }
 
@@ -295,7 +297,7 @@ bool CodeGen_SPIR_Dev::use_soft_float_abi() const {
 }
 
 vector<char> CodeGen_SPIR_Dev::compile_to_src() {
-    
+
     optimize_module();
 
     SmallVector<char, 1024> buffer;

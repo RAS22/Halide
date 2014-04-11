@@ -58,7 +58,7 @@ extern int halide_printf(void *user_context, const char *, ...);
  * implementation of halide_error in AOT code.  See
  * Func::set_error_handler.
  */
-extern void halide_error(void *user_context, const char *msg);
+extern void halide_error(void *user_context, const char *);
 
 /** A macro that calls halide_error if the supplied condition is false. */
 #define halide_assert(user_context, cond) if (!(cond)) halide_error(user_context, #cond);
@@ -102,14 +102,27 @@ extern int32_t halide_debug_to_file(void *user_context, const char *filename,
                                     int32_t bytes_per_element);
 
 
-enum halide_trace_event_t {halide_trace_load = 0,
-                           halide_trace_store = 1,
-                           halide_trace_begin_realization = 2,
-                           halide_trace_end_realization = 3,
-                           halide_trace_produce = 4,
-                           halide_trace_update = 5,
-                           halide_trace_consume = 6,
-                           halide_trace_end_consume = 7};
+enum halide_trace_event_code {halide_trace_load = 0,
+                              halide_trace_store = 1,
+                              halide_trace_begin_realization = 2,
+                              halide_trace_end_realization = 3,
+                              halide_trace_produce = 4,
+                              halide_trace_update = 5,
+                              halide_trace_consume = 6,
+                              halide_trace_end_consume = 7};
+
+struct halide_trace_event {
+    const char *func;
+    halide_trace_event_code event;
+    int32_t parent_id;
+    int32_t type_code;
+    int32_t bits;
+    int32_t vector_width;
+    int32_t value_index;
+    void *value;
+    int32_t dimensions;
+    int32_t *coordinates;
+};
 
 /** Called when Funcs are marked as trace_load, trace_store, or
  * trace_realization. See Func::set_custom_trace. The default
@@ -140,15 +153,16 @@ enum halide_trace_event_t {halide_trace_load = 0,
  * realization. Within a single production, the ordering of events is
  * meaningful.
  */
-extern int32_t halide_trace(void *user_context, const char *func,
-                            halide_trace_event_t event, int32_t parent_id,
-                            int32_t type_code, int32_t bits, int32_t vector_width,
-                            int32_t value_idx, void *value,
-                            int32_t dimensions, const int32_t *coordinates);
+extern int32_t halide_trace(void *user_context, const halide_trace_event *event);
 
 /** If tracing is writing to a file. This call closes that file
  * (flushing the trace). Returns zero on success. */
 extern int halide_shutdown_trace();
+
+/** Set the seed for the random number generator used by
+ * random_float. Also clears all other internal state for the random
+ * number generator. */
+extern void halide_set_random_seed(uint32_t seed);
 
 #ifdef __cplusplus
 } // End extern "C"

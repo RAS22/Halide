@@ -2,19 +2,13 @@
 #include "IRMutator.h"
 #include "Scope.h"
 #include "Bounds.h"
-#include "Debug.h"
-#include "IRPrinter.h"
 #include "IROperator.h"
-#include "Simplify.h"
-#include "Substitute.h"
 #include "Inline.h"
-#include <sstream>
 
 namespace Halide {
 namespace Internal {
 
 using std::string;
-using std::ostringstream;
 using std::vector;
 using std::map;
 using std::pair;
@@ -42,34 +36,12 @@ bool depends_on_bounds_inference(Expr e) {
     return d.result;
 }
 
-
-struct FuncIsCalledByExpr : public IRVisitor {
-    using IRVisitor::visit;
-
-    Function f;
-    bool result;
-    void visit(const Call *call) {
-        if (call->func.same_as(f)) {
-            result = true;
-        } else {
-            IRVisitor::visit(call);
-        }
-    }
-};
-
-bool func_is_called_by_expr(Function f, Expr e) {
-    FuncIsCalledByExpr c;
-    c.f = f;
-    c.result = false;
-    e.accept(&c);
-    return c.result;
-}
-
 }
 
 class BoundsInference : public IRMutator {
 public:
     const vector<Function> &funcs;
+    const FuncValueBounds &func_bounds;
     set<string> in_pipeline, inner_productions;
     Scope<int> in_stages;
 
@@ -113,10 +85,66 @@ public:
             assert(b.empty() || b.size() == func.args().size());
 
             if (func.has_extern_definition()) {
-                // After we define our bounds we need to run the
-                // bounds query to define bounds for my
-                // consumers.
+                // After we define our bounds required, we need to
+                // figure out what we're actually going to compute,
+                // and what inputs we need. To do this we:
+
+                // 1) Grab a handle on the bounds query results from one level up
+
+                // 2) Run the bounds query to let it round up the output size.
+
+                // 3) Shift the requested output box back inside of the
+                // bounds query result from one loop level up (in case
+                // it was rounded up)
+
+                // 4) then run the bounds query again to get the input
+                // sizes.
+
+                // Because we're wrapping a stmt, this happens in reverse order.
+
+                // 4)
                 s = do_bounds_query(s, in_pipeline);
+
+                // If we're at the outermost loop, we haven't made any
+                // outer promises about what the bounds will be, so we
+                // can bail out here.
+
+                if (!in_pipeline.empty()) {
+                    // 3)
+                    string outer_query_name = func.name() + ".outer_bounds_query";
+                    Expr outer_query = Variable::make(Handle(), outer_query_name);
+                    string inner_query_name = func.name() + ".o0.bounds_query";
+                    Expr inner_query = Variable::make(Handle(), inner_query_name);
+                    for (int i = 0; i < func.dimensions(); i++) {
+                        Expr outer_min = Call::make(Int(32), Call::extract_buffer_min,
+                                                    vec<Expr>(outer_query, i), Call::Intrinsic);
+                        Expr outer_extent = Call::make(Int(32), Call::extract_buffer_extent,
+                                                       vec<Expr>(outer_query, i), Call::Intrinsic);
+                        Expr outer_max_plus_one = outer_min + outer_extent;
+
+                        Expr inner_min = Call::make(Int(32), Call::extract_buffer_min,
+                                                    vec<Expr>(inner_query, i), Call::Intrinsic);
+                        Expr inner_extent = Call::make(Int(32), Call::extract_buffer_extent,
+                                                       vec<Expr>(inner_query, i), Call::Intrinsic);
+                        Expr inner_max_plus_one = inner_min + inner_extent;
+
+                        // Push 'inner' inside of 'outer'
+                        Expr new_min = Min::make(inner_min, outer_max_plus_one - inner_extent);
+                        Expr new_extent = inner_extent;
+                        Expr new_max = new_min + new_extent - 1;
+
+                        // Modify the region to be computed accordingly
+                        s = LetStmt::make(func.name() + ".s0." + func.args()[i] + ".max", new_max, s);
+                        s = LetStmt::make(func.name() + ".s0." + func.args()[i] + ".min", new_min, s);
+                    }
+
+                    // 2)
+                    s = do_bounds_query(s, in_pipeline);
+
+                    // 1)
+                    s = LetStmt::make(func.name() + ".outer_bounds_query",
+                                      Variable::make(Handle(), func.name() + ".o0.bounds_query"), s);
+                }
             }
 
             if (in_pipeline.count(name) == 0) {
@@ -165,24 +193,9 @@ public:
         }
 
         Stmt do_bounds_query(Stmt s, const set<string> &in_pipeline) {
+
             const string &extern_name = func.extern_function_name();
             const vector<ExternFuncArgument> &args = func.extern_arguments();
-
-            // If we're already inside a pipeline for all of the
-            // inputs, this is pointless, because we know their
-            // bounds.
-            bool need_query = false;
-            for (size_t i = 0; i < args.size(); i++) {
-                if (args[i].is_func()) {
-                    Function input(args[i].func);
-                    if (in_pipeline.count(input.name()) == 0) {
-                        need_query = true;
-                    }
-                }
-            }
-            if (!need_query) {
-                return s;
-            }
 
             vector<Expr> bounds_inference_args;
 
@@ -252,8 +265,11 @@ public:
             Expr e = Call::make(Int(32), extern_name,
                                 bounds_inference_args, Call::Extern);
             // Check if it succeeded
-            Stmt check = AssertStmt::make(EQ::make(e, 0), "Bounds inference call to external func " +
-                                          extern_name + " returned non-zero value");
+            string result_name = unique_name('t');
+            Expr result = Variable::make(Int(32), result_name);
+            Stmt check = AssertStmt::make(EQ::make(result, 0), "Bounds inference call to external func " +
+                                          extern_name + " returned non-zero value: %d", vec<Expr>(result));
+            check = LetStmt::make(result_name, e, check);
 
             // Now inner code is free to extract the fields from the buffer_t
             s = Block::make(check, s);
@@ -301,7 +317,9 @@ public:
     };
     vector<Stage> stages;
 
-    BoundsInference(const vector<Function> &f) : funcs(f) {
+    BoundsInference(const vector<Function> &f,
+                    const FuncValueBounds &fb) :
+        funcs(f), func_bounds(fb) {
         assert(!f.empty());
         Function output_function = f[f.size()-1];
 
@@ -415,7 +433,7 @@ public:
             } else {
                 const vector<Expr> &exprs = consumer.exprs;
                 for (size_t j = 0; j < exprs.size(); j++) {
-                    map<string, Box> new_boxes = boxes_required(exprs[j], scope);
+                    map<string, Box> new_boxes = boxes_required(exprs[j], scope, func_bounds);
                     for (map<string, Box>::iterator iter = new_boxes.begin();
                          iter != new_boxes.end(); ++iter) {
                         merge_boxes(boxes[iter->first], iter->second);
@@ -538,18 +556,18 @@ public:
         // Figure out how much of it we're producing
         Box box;
         if (producing >= 0) {
-            box = box_provided(body, stages[producing].name);
+            box = box_provided(body, stages[producing].name, Scope<Interval>(), func_bounds);
             assert((int)box.size() == f.dimensions());
         }
 
         // Recurse.
         body = mutate(body);
 
-        // We only care about the bounds of things that have a
-        // production inside this loop somewhere, and their
-        // consumers that we're not already in a pipeline of.
+        // We only care about the bounds of a func if:
+        // A) We're not already in a pipeline over that func AND
+        // B.1) There's a production of this func somewhere inside this loop OR
+        // B.2) We're downstream (a consumer) of a func for which we care about the bounds.
         vector<bool> bounds_needed(stages.size(), false);
-
         for (size_t i = 0; i < stages.size(); i++) {
             if (inner_productions.count(stages[i].name)) {
                 bounds_needed[i] = true;
@@ -626,7 +644,8 @@ public:
 
 
 Stmt bounds_inference(Stmt s, const vector<string> &order,
-                      const map<string, Function> &env) {
+                      const map<string, Function> &env,
+                      const FuncValueBounds &func_bounds) {
 
     vector<Function> funcs(order.size());
     for (size_t i = 0; i < order.size(); i++) {
@@ -635,7 +654,7 @@ Stmt bounds_inference(Stmt s, const vector<string> &order,
 
     // Add an outermost bounds inference marker
     s = For::make("<outermost>", 0, 1, For::Serial, s);
-    s = BoundsInference(funcs).mutate(s);
+    s = BoundsInference(funcs, func_bounds).mutate(s);
     return s.as<For>()->body;
 }
 

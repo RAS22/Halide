@@ -31,8 +31,7 @@ public:
 
 protected:
 
-    /** Which arm target are we compiling for */
-    Target target;
+    llvm::Triple get_target_triple() const;
 
     /** Generate a call to a neon intrinsic */
     // @{
@@ -65,7 +64,7 @@ protected:
     struct Pattern {
         std::string intrin;
         Expr pattern;
-        enum PatternType {Simple = 0, LeftShift, RightShift};
+        enum PatternType {Simple = 0, LeftShift, RightShift, NarrowArgs};
         PatternType type;
         Pattern() {}
         Pattern(std::string i, Expr p, PatternType t = Simple) : intrin(i), pattern(p), type(t) {}

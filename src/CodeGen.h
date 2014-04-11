@@ -22,6 +22,7 @@ class CallInst;
 class ExecutionEngine;
 class AllocaInst;
 class Constant;
+class Triple;
 }
 
 #include <map>
@@ -35,6 +36,7 @@ class Constant;
 #include "Scope.h"
 #include "JITCompiledModule.h"
 #include "ModulusRemainder.h"
+#include "Target.h"
 
 namespace Halide {
 namespace Internal {
@@ -49,7 +51,7 @@ class CodeGen : public IRVisitor {
 public:
     mutable RefCount ref_count;
 
-    CodeGen();
+    CodeGen(Target t);
     virtual ~CodeGen();
 
     /** Take a halide statement and compiles it to an llvm module held
@@ -61,12 +63,12 @@ public:
 
     /** Emit a compiled halide statement as llvm bitcode. Call this
      * after calling compile. */
-    void compile_to_bitcode(const std::string &filename);
+    virtual void compile_to_bitcode(const std::string &filename);
 
     /** Emit a compiled halide statement as either an object file, or
      * as raw assembly, depending on the value of the second
      * argument. Call this after calling compile. */
-    void compile_to_native(const std::string &filename, bool assembly = false);
+    virtual void compile_to_native(const std::string &filename, bool assembly = false);
 
     /** Compile to machine code stored in memory, and return some
      * functions pointers into that machine code. */
@@ -93,7 +95,11 @@ public:
      * module cleanup routines. */
     virtual void jit_finalize(llvm::ExecutionEngine *, llvm::Module *, std::vector<void (*)()> *) {}
 
+    /** Initialize internal llvm state for the enabled targets. */
     static void initialize_llvm();
+
+    /** Which built-in functions require a user-context first argument? */
+    static bool function_takes_user_context(const std::string &name);
 
 protected:
 
@@ -114,6 +120,9 @@ protected:
     llvm::IRBuilder<true, llvm::ConstantFolder, llvm::IRBuilderDefaultInserter<true> > *builder;
     llvm::Value *value;
     //@}
+
+    /** The target we're generating code for */
+    Halide::Target target;
 
     /** Initialize the CodeGen internal state to compile a fresh
      * module. This allows reuse of one CodeGen object to compiled
@@ -166,7 +175,8 @@ protected:
     void define_buffer_t();
 
     /** Codegen an assertion. If false, it bails out and calls the error handler. */
-    void create_assertion(llvm::Value *condition, const std::string &message);
+    void create_assertion(llvm::Value *condition, const std::string &message,
+                          const std::vector<llvm::Value *> &args = std::vector<llvm::Value *>());
 
     /** Put a string constant in the module as a global variable and return a pointer to it. */
     llvm::Constant *create_string_constant(const std::string &str);

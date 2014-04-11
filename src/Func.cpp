@@ -1,3 +1,8 @@
+#include <algorithm>
+#include <iostream>
+#include <string.h>
+#include <fstream>
+
 #include "IR.h"
 #include "Func.h"
 #include "Util.h"
@@ -12,10 +17,6 @@
 #include "Param.h"
 #include "Debug.h"
 #include "Target.h"
-#include <algorithm>
-#include <iostream>
-#include <string.h>
-#include <fstream>
 
 namespace Halide {
 
@@ -35,7 +36,8 @@ Func::Func(const string &name) : func(unique_name(name)),
                                  custom_free(NULL),
                                  custom_do_par_for(NULL),
                                  custom_do_task(NULL),
-                                 custom_trace(NULL) {
+                                 custom_trace(NULL),
+                                 random_seed(0) {
 }
 
 Func::Func() : func(unique_name('f')),
@@ -44,7 +46,8 @@ Func::Func() : func(unique_name('f')),
                custom_free(NULL),
                custom_do_par_for(NULL),
                custom_do_task(NULL),
-               custom_trace(NULL) {
+               custom_trace(NULL),
+               random_seed(0) {
 }
 
 Func::Func(const Internal::Function &f) : func(f),
@@ -62,8 +65,19 @@ Func::Func(Expr e) : func(unique_name('f')),
                      custom_free(NULL),
                      custom_do_par_for(NULL),
                      custom_do_task(NULL),
-                     custom_trace(NULL) {
+                     custom_trace(NULL),
+                     random_seed(0) {
     (*this)(_) = e;
+}
+
+Func::Func(Function f) : func(f),
+                     error_handler(NULL),
+                     custom_malloc(NULL),
+                     custom_free(NULL),
+                     custom_do_par_for(NULL),
+                     custom_do_task(NULL),
+                     custom_trace(NULL),
+                     random_seed(0) {
 }
 
 /*
@@ -291,8 +305,10 @@ FuncRefExpr Func::operator()(vector<Expr> args) const {
 int Func::add_implicit_vars(vector<Var> &args) const {
     int placeholder_pos = -1;
     std::vector<Var>::iterator iter = args.begin();
-    while (iter != args.end() && !iter->same_as(_))
+
+    while (iter != args.end() && !iter->same_as(_)) {
         iter++;
+    }
     if (iter != args.end()) {
         placeholder_pos = (int)(iter - args.begin());
         int i = 0;
@@ -303,25 +319,12 @@ int Func::add_implicit_vars(vector<Var> &args) const {
             iter++;
         }
     }
-#if HALIDE_WARNINGS_FOR_OLD_IMPLICITS
-    else {
-        // The placeholder_pos is used in lhs context. This line fakes an _ at the end of
-        // the provided arguments.
-        placeholder_pos = args.size();
-        if ((int)args.size() < dimensions()) {
-            std::cerr << "Implicit arguments without placeholders are deprecated. Adding " <<
-              dimensions() - args.size() << " arguments to Func " << name() << std::endl;
 
-            int i = 0;
-            placeholder_pos = args.size();
-            while ((int)args.size() < dimensions()) {
-                Internal::debug(2) << "Adding implicit var " << i << " to call to " << name() << "\n";
-                args.push_back(Var::implicit(i++));
-
-            }
-        }
+    if (func.has_pure_definition() && args.size() != (size_t)dimensions()) {
+        std::cerr << "Func " << name() << " was called with "
+                  << args.size() << " arguments, but was defined with " << dimensions() << "\n";
+        assert(false);
     }
-#endif
 
     return placeholder_pos;
 }
@@ -331,7 +334,7 @@ int Func::add_implicit_vars(vector<Expr> &args) const {
     std::vector<Expr>::iterator iter = args.begin();
     while (iter != args.end()) {
         const Variable *var = iter->as<Variable>();
-        if (var != NULL && Var::is_implicit(var->name))
+        if (var && Var::is_implicit(var->name))
             break;
         iter++;
     }
@@ -345,25 +348,12 @@ int Func::add_implicit_vars(vector<Expr> &args) const {
             iter++;
         }
     }
-#if HALIDE_WARNINGS_FOR_OLD_IMPLICITS
-    else {
-        // The placeholder_pos is used in lhs context. This line fakes an _ at the end of
-        // the provided arguments.
-        placeholder_pos = args.size();
-        if ((int)args.size() < dimensions()) {
-            std::cerr << "Implicit arguments without placeholders are deprecated. Adding " <<
-              dimensions() - args.size() << " arguments to Func " << name() << std::endl;
 
-            int i = 0;
-            placeholder_pos = args.size();
-            while ((int)args.size() < dimensions()) {
-                Internal::debug(2) << "Adding implicit var " << i << " to call to " << name() << "\n";
-                args.push_back(Var::implicit(i++));
-
-            }
-        }
+    if (func.has_pure_definition() && args.size() != (size_t)dimensions()) {
+        std::cerr << "Func " << name() << " was called with "
+                  << args.size() << " arguments, but was defined with " << dimensions() << "\n";
+        assert(false);
     }
-#endif
 
     return placeholder_pos;
 }
@@ -670,13 +660,13 @@ ScheduleHandle &ScheduleHandle::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, V
     return reorder_vars(*this, vars, 10);
 }
 
-ScheduleHandle &ScheduleHandle::cuda_threads(Var tx) {
+ScheduleHandle &ScheduleHandle::gpu_threads(Var tx, GPUAPI /* gpu_api */) {
     parallel(tx);
     rename(tx, Var("threadidx"));
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::cuda_threads(Var tx, Var ty) {
+ScheduleHandle &ScheduleHandle::gpu_threads(Var tx, Var ty, GPUAPI /* gpu_api */) {
     parallel(tx);
     parallel(ty);
     rename(tx, Var("threadidx"));
@@ -684,7 +674,7 @@ ScheduleHandle &ScheduleHandle::cuda_threads(Var tx, Var ty) {
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::cuda_threads(Var tx, Var ty, Var tz) {
+ScheduleHandle &ScheduleHandle::gpu_threads(Var tx, Var ty, Var tz, GPUAPI /* gpu_api */) {
     parallel(tx);
     parallel(ty);
     parallel(tz);
@@ -694,13 +684,13 @@ ScheduleHandle &ScheduleHandle::cuda_threads(Var tx, Var ty, Var tz) {
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::cuda_blocks(Var tx) {
+ScheduleHandle &ScheduleHandle::gpu_blocks(Var tx, GPUAPI /* gpu_api */) {
     parallel(tx);
     rename(tx, Var("blockidx"));
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::cuda_blocks(Var tx, Var ty) {
+ScheduleHandle &ScheduleHandle::gpu_blocks(Var tx, Var ty, GPUAPI /* gpu_api */) {
     parallel(tx);
     parallel(ty);
     rename(tx, Var("blockidx"));
@@ -708,7 +698,7 @@ ScheduleHandle &ScheduleHandle::cuda_blocks(Var tx, Var ty) {
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::cuda_blocks(Var tx, Var ty, Var tz) {
+ScheduleHandle &ScheduleHandle::gpu_blocks(Var tx, Var ty, Var tz, GPUAPI /* gpu_api */) {
     parallel(tx);
     parallel(ty);
     parallel(tz);
@@ -718,21 +708,22 @@ ScheduleHandle &ScheduleHandle::cuda_blocks(Var tx, Var ty, Var tz) {
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::cuda(Var bx, Var tx) {
-    return cuda_blocks(bx).cuda_threads(tx);
+ScheduleHandle &ScheduleHandle::gpu(Var bx, Var tx, GPUAPI /* gpu_api */) {
+    return gpu_blocks(bx).gpu_threads(tx);
 }
 
-ScheduleHandle &ScheduleHandle::cuda(Var bx, Var by,
-                                     Var tx, Var ty) {
-    return cuda_blocks(bx, by).cuda_threads(tx, ty);
+ScheduleHandle &ScheduleHandle::gpu(Var bx, Var by,
+                                    Var tx, Var ty, GPUAPI /* gpu_api */) {
+    return gpu_blocks(bx, by).gpu_threads(tx, ty);
 }
 
-ScheduleHandle &ScheduleHandle::cuda(Var bx, Var by, Var bz,
-                                     Var tx, Var ty, Var tz) {
-    return cuda_blocks(bx, by, bz).cuda_threads(tx, ty, tz);
+ScheduleHandle &ScheduleHandle::gpu(Var bx, Var by, Var bz,
+                                    Var tx, Var ty, Var tz,
+				    GPUAPI /* gpu_api */) {
+    return gpu_blocks(bx, by, bz).gpu_threads(tx, ty, tz);
 }
 
-ScheduleHandle &ScheduleHandle::cuda_tile(Var x, int x_size) {
+ScheduleHandle &ScheduleHandle::gpu_tile(Var x, Expr x_size, GPUAPI /* gpu_api */) {
     Var bx("blockidx"), tx("threadidx");
     split(x, bx, tx, x_size);
     parallel(bx);
@@ -741,8 +732,9 @@ ScheduleHandle &ScheduleHandle::cuda_tile(Var x, int x_size) {
 }
 
 
-ScheduleHandle &ScheduleHandle::cuda_tile(Var x, Var y,
-                                          int x_size, int y_size) {
+ScheduleHandle &ScheduleHandle::gpu_tile(Var x, Var y,
+                                         Expr x_size, Expr y_size,
+					 GPUAPI /* gpu_api */) {
     Var bx("blockidx"), by("blockidy"), tx("threadidx"), ty("threadidy");
     tile(x, y, bx, by, tx, ty, x_size, y_size);
     parallel(bx);
@@ -752,8 +744,9 @@ ScheduleHandle &ScheduleHandle::cuda_tile(Var x, Var y,
     return *this;
 }
 
-ScheduleHandle &ScheduleHandle::cuda_tile(Var x, Var y, Var z,
-                                          int x_size, int y_size, int z_size) {
+ScheduleHandle &ScheduleHandle::gpu_tile(Var x, Var y, Var z,
+                                         Expr x_size, Expr y_size, Expr z_size,
+					 GPUAPI /* gpu_api */) {
     Var bx("blockidx"), by("blockidy"), bz("blockidz"),
         tx("threadidx"), ty("threadidy"), tz("threadidz");
     split(x, bx, tx, x_size);
@@ -909,63 +902,63 @@ Func &Func::reorder(VarOrRVar x, VarOrRVar y, VarOrRVar z, VarOrRVar w,
     return *this;
 }
 
-Func &Func::cuda_threads(Var tx) {
-    ScheduleHandle(func.schedule()).cuda_threads(tx);
+Func &Func::gpu_threads(Var tx, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu_threads(tx, gpuapi);
     return *this;
 }
 
-Func &Func::cuda_threads(Var tx, Var ty) {
-    ScheduleHandle(func.schedule()).cuda_threads(tx, ty);
+Func &Func::gpu_threads(Var tx, Var ty, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu_threads(tx, ty, gpuapi);
     return *this;
 }
 
-Func &Func::cuda_threads(Var tx, Var ty, Var tz) {
-    ScheduleHandle(func.schedule()).cuda_threads(tx, ty, tz);
+Func &Func::gpu_threads(Var tx, Var ty, Var tz, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu_threads(tx, ty, tz, gpuapi);
     return *this;
 }
 
-Func &Func::cuda_blocks(Var bx) {
-    ScheduleHandle(func.schedule()).cuda_blocks(bx);
+  Func &Func::gpu_blocks(Var bx, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu_blocks(bx, gpuapi);
     return *this;
 }
 
-Func &Func::cuda_blocks(Var bx, Var by) {
-    ScheduleHandle(func.schedule()).cuda_blocks(bx, by);
+Func &Func::gpu_blocks(Var bx, Var by, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu_blocks(bx, by, gpuapi);
     return *this;
 }
 
-Func &Func::cuda_blocks(Var bx, Var by, Var bz) {
-    ScheduleHandle(func.schedule()).cuda_blocks(bx, by, bz);
+Func &Func::gpu_blocks(Var bx, Var by, Var bz, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu_blocks(bx, by, bz, gpuapi);
     return *this;
 }
 
-Func &Func::cuda(Var bx, Var tx) {
-    ScheduleHandle(func.schedule()).cuda(bx, tx);
+Func &Func::gpu(Var bx, Var tx, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu(bx, tx, gpuapi);
     return *this;
 }
 
-Func &Func::cuda(Var bx, Var by, Var tx, Var ty) {
-    ScheduleHandle(func.schedule()).cuda(bx, by, tx, ty);
+Func &Func::gpu(Var bx, Var by, Var tx, Var ty, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu(bx, by, tx, ty, gpuapi);
     return *this;
 }
 
-Func &Func::cuda(Var bx, Var by, Var bz, Var tx, Var ty, Var tz) {
-    ScheduleHandle(func.schedule()).cuda(bx, by, bz, tx, ty, tz);
+Func &Func::gpu(Var bx, Var by, Var bz, Var tx, Var ty, Var tz, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu(bx, by, bz, tx, ty, tz, gpuapi);
     return *this;
 }
 
-Func &Func::cuda_tile(Var x, int x_size) {
-    ScheduleHandle(func.schedule()).cuda_tile(x, x_size);
+  Func &Func::gpu_tile(Var x, int x_size, GPUAPI gpuapi) {
+    ScheduleHandle(func.schedule()).gpu_tile(x, x_size, gpuapi);
     return *this;
 }
 
-Func &Func::cuda_tile(Var x, Var y, int x_size, int y_size) {
-    ScheduleHandle(func.schedule()).cuda_tile(x, y, x_size, y_size);
+  Func &Func::gpu_tile(Var x, Var y, int x_size, int y_size, GPUAPI gpuapi) {
+    ScheduleHandle(func.schedule()).gpu_tile(x, y, x_size, y_size, gpuapi);
     return *this;
 }
 
-Func &Func::cuda_tile(Var x, Var y, Var z, int x_size, int y_size, int z_size) {
-    ScheduleHandle(func.schedule()).cuda_tile(x, y, z, x_size, y_size, z_size);
+Func &Func::gpu_tile(Var x, Var y, Var z, int x_size, int y_size, int z_size, GPUAPI gpuapi) {
+  ScheduleHandle(func.schedule()).gpu_tile(x, y, z, x_size, y_size, z_size, gpuapi);
     return *this;
 }
 
@@ -1107,16 +1100,35 @@ public:
 vector<string> FuncRefVar::args_with_implicit_vars(const vector<Expr> &e) const {
     vector<string> a = args;
 
-    if (implicit_placeholder_pos != -1) {
-        CountImplicitVars count(e);
+    CountImplicitVars count(e);
 
-        Internal::debug(2) << "Adding " << count.count << " implicit vars to LHS of " <<
-          func.name() << " at position " << implicit_placeholder_pos << "\n";
+    if (count.count > 0) {
+        if (implicit_placeholder_pos != -1) {
+            Internal::debug(2) << "Adding " << count.count << " implicit vars to LHS of " <<
+                func.name() << " at position " << implicit_placeholder_pos << "\n";
 
-        vector<std::string>::iterator iter = a.begin() + implicit_placeholder_pos;
-        for (int i = 0; i < count.count; i++) {
-            iter = a.insert(iter, Var::implicit(i).name());
-            iter++;
+            vector<std::string>::iterator iter = a.begin() + implicit_placeholder_pos;
+            for (int i = 0; i < count.count; i++) {
+                iter = a.insert(iter, Var::implicit(i).name());
+                iter++;
+            }
+        }
+    }
+
+    // Check the implicit vars in the RHS also exist in the LHS
+    for (int i = 0; i < count.count; i++) {
+        Var v = Var::implicit(i);
+        bool found = false;
+        for (size_t j = 0; j < a.size(); j++) {
+            if (a[j] == v.name()) {
+                found = true;
+            }
+        }
+        if (!found) {
+            std::cerr << "Right-hand-side of pure definition of " << func.name()
+                      << " uses implicit variables, but the left-hand-side does not"
+                      << " contain the placeholder symbol '_'. This behavior has been deprecated.\n";
+            assert(false);
         }
     }
 
@@ -1236,24 +1248,45 @@ FuncRefExpr::FuncRefExpr(Internal::Function f, const vector<string> &a,
 vector<Expr> FuncRefExpr::args_with_implicit_vars(const vector<Expr> &e) const {
     vector<Expr> a = args;
 
-    if (implicit_placeholder_pos != -1) {
-        CountImplicitVars f(e);
-        // TODO: Check if there is a test case for this and add one if not.
-        // Implicit vars are also allowed in the lhs of a reduction. E.g.:
-        // f(x, y) = x+y
-        // g(x, y) = 0
-        // g(f(r.x)) = 1   (this means g(f(r.x, i0), i0) = 1)
+    CountImplicitVars count(e);
+    // TODO: Check if there is a test case for this and add one if not.
+    // Implicit vars are also allowed in the lhs of a reduction. E.g.:
+    // f(x, y, z) = x+y
+    // g(x, y, z) = 0
+    // g(f(r.x, _), _) = 1   (this means g(f(r.x, _0, _1), _0, _1) = 1)
 
-        for (size_t i = 0; i < a.size(); i++) {
-            a[i].accept(&f);
+    for (size_t i = 0; i < a.size(); i++) {
+        a[i].accept(&count);
+    }
+
+    if (count.count > 0) {
+        if (implicit_placeholder_pos != -1) {
+            Internal::debug(2) << "Adding " << count.count << " implicit vars to LHS of " << func.name() << "\n";
+
+            vector<Expr>::iterator iter = a.begin() + implicit_placeholder_pos;
+            for (int i = 0; i < count.count; i++) {
+                iter = a.insert(iter, Var::implicit(i));
+                iter++;
+            }
         }
+    }
 
-        Internal::debug(2) << "Adding " << f.count << " implicit vars to LHS of " << func.name() << "\n";
-
-        vector<Expr>::iterator iter = a.begin() + implicit_placeholder_pos;
-        for (int i = 0; i < f.count; i++) {
-            iter = a.insert(iter, Var::implicit(i));
-            iter++;
+    // Check the implicit vars in the RHS also exist in the LHS
+    for (int i = 0; i < count.count; i++) {
+        Var v = Var::implicit(i);
+        bool found = false;
+        for (size_t j = 0; j < a.size(); j++) {
+            if (const Variable *arg = a[j].as<Variable>()) {
+                if (arg->name == v.name()) {
+                    found = true;
+                }
+            }
+        }
+        if (!found) {
+            std::cerr << "Right-hand-side of update definition of " << func.name()
+                      << " uses implicit variables, but the left-hand-side does not"
+                      << " contain the placeholder symbol '_'. This behavior has been deprecated.\n";
+            assert(false);
         }
     }
 
@@ -1297,7 +1330,9 @@ void define_base_case(Internal::Function func, const vector<Expr> &a, Expr e) {
     // Reuse names of existing pure args
     for (size_t i = 0; i < a.size(); i++) {
         if (const Variable *v = a[i].as<Variable>()) {
-            if (!v->param.defined()) pure_args[i] = Var(v->name);
+            if (!v->param.defined()) {
+                pure_args[i] = Var(v->name);
+            }
         } else {
             pure_args[i] = Var();
         }
@@ -1564,7 +1599,7 @@ void validate_arguments(const string &output,
     assert(defined() && "Can't compile undefined function");
 
     if (!lowered.defined()) {
-        lowered = Halide::Internal::lower(func);
+        lowered = Halide::Internal::lower(func, target);
     }
 
     vector<Buffer> images_to_embed;
@@ -1588,7 +1623,7 @@ void Func::compile_to_bitcode(const string &filename, vector<Argument> args, con
     assert(defined() && "Can't compile undefined function");
 
     if (!lowered.defined()) {
-        lowered = Halide::Internal::lower(func);
+        lowered = Halide::Internal::lower(func, target);
     }
 
     vector<Buffer> images_to_embed;
@@ -1619,7 +1654,7 @@ void Func::compile_to_header(const string &filename, vector<Argument> args, cons
 
 void Func::compile_to_c(const string &filename, vector<Argument> args, const string &fn_name) {
     if (!lowered.defined()) {
-        lowered = Halide::Internal::lower(func);
+        lowered = Halide::Internal::lower(func, get_host_target());
     }
 
     vector<Buffer> images_to_embed;
@@ -1636,7 +1671,7 @@ void Func::compile_to_c(const string &filename, vector<Argument> args, const str
 
 void Func::compile_to_lowered_stmt(const string &filename) {
     if (!lowered.defined()) {
-        lowered = Halide::Internal::lower(func);
+        lowered = Halide::Internal::lower(func, get_host_target());
     }
 
     ofstream stmt_output(filename.c_str());
@@ -1682,7 +1717,7 @@ void Func::compile_to_assembly(const string &filename, vector<Argument> args, co
                                const Target &target) {
     assert(defined() && "Can't compile undefined function");
 
-    if (!lowered.defined()) lowered = Halide::Internal::lower(func);
+    if (!lowered.defined()) lowered = Halide::Internal::lower(func, target);
 
     vector<Buffer> images_to_embed;
     validate_arguments(name(), args, lowered, images_to_embed);
@@ -1737,11 +1772,11 @@ void Func::set_custom_trace(Internal::JITCompiledModule::TraceFn t) {
     }
 }
 
-  void Func::realize(Buffer b, const Target &target) {
+void Func::realize(Buffer b, const Target &target) {
     realize(Realization(vec<Buffer>(b)), target);
 }
 
-  void Func::realize(Realization dst, const Target &target) {
+void Func::realize(Realization dst, const Target &target) {
     if (!compiled_module.wrapped_function) compile_jit(target);
 
     assert(compiled_module.wrapped_function);
@@ -1770,12 +1805,14 @@ void Func::set_custom_trace(Internal::JITCompiledModule::TraceFn t) {
         Internal::debug(3) << "Updating address for image param: " << image_param_args[i].second.name() << "\n";
         Buffer b = image_param_args[i].second.get_buffer();
         assert(b.defined() && "An ImageParam is not bound to a buffer");
-        arg_values[image_param_args[i].first] = b.raw_buffer();
+        buffer_t *buf = b.raw_buffer();
+        arg_values[image_param_args[i].first] = buf;
+        assert((buf->host || buf->dev) && "An ImageParam is bound to a buffer with NULL host and dev pointers");
     }
 
     for (size_t i = 0; i < arg_values.size(); i++) {
         Internal::debug(2) << "Arg " << i << " = " << arg_values[i] << "\n";
-        assert(arg_values[i] != NULL && "An argument to a jitted function is null\n");
+        assert(arg_values[i] && "An argument to a jitted function is null\n");
     }
 
     Internal::debug(2) << "Calling jitted function\n";
@@ -1792,7 +1829,9 @@ void Func::infer_input_bounds(Buffer dst) {
 }
 
 void Func::infer_input_bounds(Realization dst) {
-    if (!compiled_module.wrapped_function) compile_jit();
+    if (!compiled_module.wrapped_function) {
+        compile_jit();
+    }
 
     assert(compiled_module.wrapped_function);
 
@@ -1808,6 +1847,7 @@ void Func::infer_input_bounds(Realization dst) {
     compiled_module.set_custom_allocator(custom_malloc, custom_free);
     compiled_module.set_custom_do_par_for(custom_do_par_for);
     compiled_module.set_custom_do_task(custom_do_task);
+    compiled_module.set_custom_trace(custom_trace);
 
     // Update the address of the buffers we're realizing into
     for (size_t i = 0; i < dst.size(); i++) {
@@ -1833,18 +1873,55 @@ void Func::infer_input_bounds(Realization dst) {
 
     for (size_t i = 0; i < arg_values.size(); i++) {
         Internal::debug(2) << "Arg " << i << " = " << arg_values[i] << "\n";
-        assert(arg_values[i] != NULL && "An argument to a jitted function is null\n");
+        assert(arg_values[i] && "An argument to a jitted function is null\n");
     }
 
-    Internal::debug(2) << "Calling jitted function\n";
-    int exit_status = compiled_module.wrapped_function(&(arg_values[0]));
-    if (exit_status) {
-        std::cerr << "Calling " << name()
-                  << " in bounds inference mode returned non-success ("
-                  << exit_status << ")\n";
+    // Figure out which buffers to watch for changes
+    vector<const buffer_t *> tracked_buffers;
+    for (size_t i = 0; i < dummy_buffers.size(); i++) {
+        tracked_buffers.push_back(&dummy_buffers[i]);
+    }
+    for (size_t i = 0; i < dst.size(); i++) {
+        if (dst[i].host_ptr() == NULL) {
+            tracked_buffers.push_back(dst[i].raw_buffer());
+        }
+    }
+    vector<buffer_t> old_buffer(tracked_buffers.size());
+
+    const int max_iters = 16;
+    int iter = 0;
+    for (iter = 0; iter < max_iters; iter++) {
+        // Make a copy of the buffers we expect to be mutated
+        for (size_t j = 0; j < tracked_buffers.size(); j++) {
+            old_buffer[j] = *tracked_buffers[j];
+        }
+        Internal::debug(2) << "Calling jitted function\n";
+        int exit_status = compiled_module.wrapped_function(&(arg_values[0]));
+        if (exit_status) {
+            std::cerr << "Calling " << name()
+                      << " in bounds inference mode returned non-success ("
+                      << exit_status << ")\n";
+            assert(false);
+        }
+        Internal::debug(2) << "Back from jitted function\n";
+        bool changed = false;
+
+        // Check if there were any changed
+        for (size_t j = 0; j < tracked_buffers.size(); j++) {
+            if (memcmp(&old_buffer[j], tracked_buffers[j], sizeof(buffer_t))) {
+                changed = true;
+            }
+        }
+        if (!changed) {
+            break;
+        }
+    }
+    if (iter == max_iters) {
+        std::cerr << "Inferring input bounds on " << name()
+                  << " didn't converge after " << max_iters
+                  << " iterations. There may be unsatisfiable constraints\n";
         assert(false);
     }
-    Internal::debug(2) << "Back from jitted function\n";
 
     // Now allocate the resulting buffers
     size_t j = 0;
@@ -1892,7 +1969,7 @@ void Func::infer_input_bounds(Realization dst) {
 void *Func::compile_jit(const Target &target) {
     assert(defined() && "Can't realize undefined function");
 
-    if (!lowered.defined()) lowered = Halide::Internal::lower(func);
+    if (!lowered.defined()) lowered = Halide::Internal::lower(func, target);
 
     // Infer arguments
     InferArguments infer_args(name());

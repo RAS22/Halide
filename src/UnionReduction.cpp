@@ -5,6 +5,7 @@
 #include "IRPrinter.h"
 #include "IROperator.h"
 #include "IREquality.h"
+#include "IRMutator.h"
 #include "Substitute.h"
 #include "Simplify.h"
 #include "ModulusRemainder.h"
@@ -118,7 +119,7 @@ static vector<UnionVar> extract_union_vars(vector<Expr> e) {
 // Are two Expr similar, i.e.
 static bool expr_same(Expr e1, Expr e2) {
     Expr e = simplify(e1-e2);
-    return (e == Expr(0));
+    return e.same_as(Expr(0));
 }
 
 
@@ -154,6 +155,15 @@ UnionVar::UnionVar(Expr m, Expr e, std::string n) {
 string UnionVar::name()   const { return _contents.ptr->var;    }
 Expr   UnionVar::min()    const { return _contents.ptr->min;    }
 Expr   UnionVar::extent() const { return _contents.ptr->extent; }
+
+bool UnionVar::same_as(UnionVar b) const {
+    bool result = false;
+    result |= (_contents.ptr->var == b._contents.ptr->var);
+    result |= (_contents.ptr->min.same_as(b._contents.ptr->min));
+    result |= (_contents.ptr->extent.same_as(b._contents.ptr->extent));
+    // TODO: compare reduction domain too
+    return result;
+}
 
 UnionVar::operator Expr() const {
     return Variable::make(Int(32),
@@ -270,9 +280,9 @@ Expr UnionReduction::upper_bound(string v) const {
     return it->second;
 }
 
-string UnionReduction::name ()         const { return _contents.ptr->name;              }
-Expr   UnionReduction::value(size_t i) const { return _contents.ptr->input[i];          }
-Type   UnionReduction::type (size_t i) const { return _contents.ptr->input[i].type();   }
+string UnionReduction::name ()      const { return _contents.ptr->name;              }
+Expr   UnionReduction::value(int i) const { return _contents.ptr->input[i];          }
+Type   UnionReduction::type (int i) const { return _contents.ptr->input[i].type();   }
 
 vector<UnionVar>       UnionReduction::uvars()      const { return _contents.ptr->uvars;      }
 vector<string>         UnionReduction::args()       const { return _contents.ptr->args;       }
@@ -382,7 +392,7 @@ UnionReduction& UnionReduction::split(string x, int tile) {
     }
     vector<Expr> input_expr_outer;
     for (size_t i=0; i<_contents.ptr->input.size(); i++)
-        input_expr_outer.push_back(substitute(xo, rxo, intra_tail.call_as_union(call_args_tail,i));
+        input_expr_outer.push_back(substitute(xo, rxo, intra_tail.call_as_union(call_args_tail,i)));
     UnionReduction tail_union(input_expr_outer, args_outer, tail_union_name);
 
     // uvars of parent transferred to intra tile term, with rxi extra and rx removed
@@ -463,7 +473,7 @@ UnionReduction& UnionReduction::split(string x, int tile) {
             uvar_unused &= !expr_depends_on_var(_contents.ptr->input[j], uvar_name);
         }
         if (uvar_unused) {
-            map<string,string>::iterator it = _contents.ptr->uvar_to_arg.find(var_name);
+            map<string,string>::iterator it = _contents.ptr->uvar_to_arg.find(uvar_name);
             if (it != _contents.ptr->uvar_to_arg.end()) {
                 _contents.ptr->arg_to_uvar.erase(it->second);
                 _contents.ptr->uvar_to_arg.erase(it);
@@ -525,6 +535,8 @@ EXPORT bool UnionReduction::subset_merge(UnionReduction& u1, UnionReduction& u2)
         exp_check &= expr_same(u1._contents.ptr->input[i], u2._contents.ptr->input[i]);
     }
 
+    // TODO: actual merging
+
     return (uvar_check && arg_check && exp_check);
 }
 
@@ -578,6 +590,10 @@ EXPORT bool UnionReduction::tuple_merge(UnionReduction& u1, UnionReduction& u2) 
         cerr << "Cannot merge " << u1.name() << " and  " << u2.name() << endl;
         assert(false);
     }
+
+    // TODO: actual merging
+
+    return (uvar_check_1 && arg_check_1 && uvar_check_2 && arg_check_2);
 }
 
 void UnionReduction::convert_to_func() {

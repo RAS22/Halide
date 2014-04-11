@@ -50,15 +50,6 @@ Func::Func() : func(unique_name('f')),
                random_seed(0) {
 }
 
-Func::Func(const Internal::Function &f) : func(f),
-               error_handler(NULL),
-               custom_malloc(NULL),
-               custom_free(NULL),
-               custom_do_par_for(NULL),
-               custom_do_task(NULL),
-               custom_trace(NULL) {
-}
-
 Func::Func(Expr e) : func(unique_name('f')),
                      error_handler(NULL),
                      custom_malloc(NULL),

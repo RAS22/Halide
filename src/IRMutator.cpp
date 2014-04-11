@@ -150,7 +150,7 @@ void IRMutator::visit(const UnionCall *op) {
     if (!changed) {
         expr = op;
     } else {
-        expr = UnionCall::make(op->union_op, new_args);
+        expr = UnionCall::make(op->union_op, new_args, op->value_index);
     }
 }
 

@@ -147,7 +147,7 @@ void Function::define(const vector<string> &args, vector<Expr> values) {
     }
 
     // Tag calls to random() with the free vars
-    int tag = rand_counter++;    
+    int tag = rand_counter++;
     for (size_t i = 0; i < values.size(); i++) {
         values[i] = lower_random(values[i], args, tag);
     }
@@ -261,7 +261,7 @@ void Function::define_reduction(const vector<Expr> &_args, vector<Expr> values) 
             free_vars.push_back(rvar);
         }
     }
-    int tag = rand_counter++;    
+    int tag = rand_counter++;
     for (size_t i = 0; i < args.size(); i++) {
         args[i] = lower_random(args[i], free_vars, tag);
     }
@@ -359,6 +359,51 @@ void Function::define_extern(const std::string &function_name,
         contents.ptr->schedule.storage_dims.push_back(arg);
     }
 
+}
+
+void Function::clear_all_definitions() {
+    // unset the flags
+    contents.ptr->trace_loads         = false;
+    contents.ptr->trace_stores        = false;
+    contents.ptr->trace_realizations  = false;
+
+    // clear the schedule
+    contents.ptr->schedule = Schedule();
+
+    // clear all names
+    //contents.ptr->name.clear();
+    //contents.ptr->debug_file.clear();
+    //contents.ptr->extern_function_name.clear();
+
+    // clear all pure definitions
+    contents.ptr->args.clear();
+    contents.ptr->values.clear();
+    contents.ptr->output_types.clear();
+
+    // clear other alternative defintions
+    contents.ptr->output_buffers.clear();
+    contents.ptr->extern_arguments.clear();
+
+    // clear reduction definitions
+    // first increment the smart pointer the same number of times as
+    // it was decremented when the reduction definitions were added
+    CountSelfReferences counter;
+    counter.func = this;
+    for (size_t j = 0; j < contents.ptr->reductions.size(); j++) {
+        ReductionDefinition r = contents.ptr->reductions[j];
+        std::vector<Expr> args   = r.args;
+        std::vector<Expr> values = r.values;
+        for (size_t i = 0; i < args.size(); i++) {
+            args[i].accept(&counter);
+        }
+        for (size_t i = 0; i < values.size(); i++) {
+            values[i].accept(&counter);
+        }
+        for (size_t i = 0; i < counter.calls.size(); i++) {
+            contents.ptr->ref_count.increment();
+        }
+    }
+    contents.ptr->reductions.clear();
 }
 
 }

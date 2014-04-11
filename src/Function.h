@@ -108,6 +108,12 @@ public:
      * definition's argument in the same index. */
     void define_reduction(const std::vector<Expr> &args, std::vector<Expr> values);
 
+    /** Remove all pure and reduction definitions. Removes pure defintion,
+     * reduction defintions, arguments, function names and schedule.
+     * Equivalent to calling the Function constructor without creating
+     * a new FunctionContents object. */
+    void clear_all_definitions();
+
     /** Construct a new function with the given name */
     Function(const std::string &n) : contents(new FunctionContents) {
         for (size_t i = 0; i < n.size(); i++) {

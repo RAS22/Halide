@@ -17,7 +17,7 @@ using std::ostream;
 namespace Halide {
 
 class Var;
-class Expr;
+struct Expr;
 
 namespace Internal {
 

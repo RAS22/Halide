@@ -62,15 +62,15 @@ private:
             Type t = op->type;
             t.width = new_width;
             if (internal.contains(op->name)) {
-                expr = Variable::make(t, op->name, op->param, op->reduction_domain);
+                expr = Variable::make(t, op->name, op->image, op->param, op->reduction_domain);
             } else if (external_lets.contains(op->name) &&
                        starting_lane == 0 &&
                        lane_stride == 2) {
-                expr = Variable::make(t, op->name + ".even_lanes", op->param, op->reduction_domain);
+                expr = Variable::make(t, op->name + ".even_lanes", op->image, op->param, op->reduction_domain);
             } else if (external_lets.contains(op->name) &&
                        starting_lane == 1 &&
                        lane_stride == 2) {
-                expr = Variable::make(t, op->name + ".odd_lanes", op->param, op->reduction_domain);
+                expr = Variable::make(t, op->name + ".odd_lanes", op->image, op->param, op->reduction_domain);
             } else {
                 // Uh-oh, we don't know how to deinterleave this vector expression
                 // Make llvm do it
@@ -263,12 +263,10 @@ void check(Expr a, Expr even, Expr odd) {
     Expr correct_even = extract_even_lanes(a);
     Expr correct_odd = extract_odd_lanes(a);
     if (!equal(correct_even, even)) {
-        std::cerr << correct_even << " != " << even << "\n";
-        assert(false);
+        internal_error << correct_even << " != " << even << "\n";
     }
     if (!equal(correct_odd, odd)) {
-        std::cerr << correct_odd << " != " << odd << "\n";
-        assert(false);
+        internal_error << correct_odd << " != " << odd << "\n";
     }
 }
 }

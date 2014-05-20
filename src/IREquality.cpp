@@ -337,6 +337,7 @@ public:
 
         expr = s->value;
         op->value.accept(this);
+        if (result) return;
 
         expr = s->index;
         op->index.accept(this);

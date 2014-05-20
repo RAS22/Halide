@@ -35,7 +35,7 @@ void Closure::visit(const For *op) {
 void Closure::visit(const Load *op) {
     op->index.accept(this);
     if (!ignore.contains(op->name)) {
-        debug(3) << "Adding " << op->name << " to closure\n";
+        debug(3) << "Adding buffer " << op->name << " to closure\n";
         BufferRef & ref = buffers[op->name];
         ref.type = op->type; // TODO: Validate type is the same as existing refs?
         ref.read = true;
@@ -48,7 +48,7 @@ void Closure::visit(const Store *op) {
     op->index.accept(this);
     op->value.accept(this);
     if (!ignore.contains(op->name)) {
-        debug(3) << "Adding " << op->name << " to closure\n";
+        debug(3) << "Adding buffer " << op->name << " to closure\n";
         BufferRef & ref = buffers[op->name];
         ref.type = op->value.type(); // TODO: Validate type is the same as existing refs?
         ref.write = true;
@@ -171,7 +171,7 @@ llvm::Type *llvm_type_of(LLVMContext *c, Halide::Type t) {
             case 64:
                 return llvm::Type::getDoubleTy(*c);
             default:
-                assert(false && "There is no llvm type matching this floating-point bit width");
+                internal_error << "There is no llvm type matching this floating-point bit width: " << t << "\n";
                 return NULL;
             }
         } else if (t.is_handle()) {
@@ -197,15 +197,16 @@ bool constant_allocation_size(const std::vector<Expr> &extents, const std::strin
             // should re-enable this.
             /*
             if ((int64_t)int_size->value > (((int64_t)(1)<<31) - 1)) {
-                std::cerr << "Dimension " << i << " for allocation " << name << " has size " <<
+                user_error
+                    << "Dimension " << i << " for allocation " << name << " has size " <<
                     int_size->value << " which is greater than 2^31 - 1.";
-                assert(false);
             }
             */
             result *= int_size->value;
             if (result > (static_cast<int64_t>(1)<<31) - 1) {
-                std::cerr << "Total size for allocation " << name << " is constant but exceeds 2^31 - 1.";
-                assert(false);
+                user_error
+                    << "Total size for allocation " << name
+                    << " is constant but exceeds 2^31 - 1.\n";
             }
         } else {
             return false;

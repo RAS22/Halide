@@ -3,6 +3,7 @@
 #include "CodeGen_GPU_Host.h"
 #include "CodeGen_PTX_Dev.h"
 #include "CodeGen_OpenCL_Dev.h"
+#include "CodeGen_OpenGL_Dev.h"
 #include "CodeGen_SPIR_Dev.h"
 #include "IROperator.h"
 #include "IRPrinter.h"
@@ -155,7 +156,7 @@ private:
         map<string, Expr> &table = inside_thread ? local_allocations : shared_allocations;
 
         // We should only encounter each allocate once
-        assert(table.find(allocate->name) == table.end());
+        internal_assert(table.find(allocate->name) == table.end());
 
         Expr size;
         if (allocate->extents.size() == 0) {
@@ -195,7 +196,6 @@ public:
                                   read_on_host(false),
                                   written_on_device(false),
                                   read_on_device(false),
-                                  has_buffer_defined(false),
                                   in_device_code(false) {}
 
 
@@ -218,7 +218,17 @@ private:
     }
 
     void visit(const Load *op) {
-        if (op->name == buf) {
+        read_access(op->name);
+        IRVisitor::visit(op);
+    }
+
+    void visit(const Store *op) {
+        write_access(op->name);
+        IRVisitor::visit(op);
+    }
+
+    void read_access(const string &name) {
+        if (name == buf) {
             if (in_device_code) {
                 used_on_device = true;
                 read_on_device = true;
@@ -227,11 +237,10 @@ private:
                 read_on_host = true;
             }
         }
-        IRVisitor::visit(op);
     }
 
-    void visit(const Store *op) {
-        if (op->name == buf) {
+    void write_access(const string &name) {
+        if (name == buf) {
             if (in_device_code) {
                 used_on_device = true;
                 written_on_device = true;
@@ -240,14 +249,21 @@ private:
                 written_on_host = true;
             }
         }
-        IRVisitor::visit(op);
     }
 
-    void visit(const LetStmt *op) {
-        IRVisitor::visit(op);
-        if (op->name == buf + ".buffer") {
-            has_buffer_defined = true;
+    void visit(const Call *op) {
+        if (op->call_type == Call::Intrinsic && op->name == Call::glsl_texture_load) {
+            internal_assert(op->args.size() == 5);
+            internal_assert(op->args[0].as<StringImm>());
+            string bufname = op->args[0].as<StringImm>()->value;
+            read_access(bufname);
+        } else if (op->call_type == Call::Intrinsic && op->name == Call::glsl_texture_store) {
+            internal_assert(op->args.size() == 6);
+            internal_assert(op->args[0].as<StringImm>());
+            string bufname = op->args[0].as<StringImm>()->value;
+            write_access(bufname);
         }
+        IRVisitor::visit(op);
     }
 };
 
@@ -269,6 +285,33 @@ protected:
 
     void visit(const For *op);
 
+    void visit(const Call *op) {
+        if (op->call_type == Call::Intrinsic &&
+            (op->name == Call::glsl_texture_load ||
+             op->name == Call::glsl_texture_store)) {
+            internal_assert(op->args[0].as<StringImm>());
+            string bufname = op->args[0].as<StringImm>()->value;
+            BufferRef &ref = buffers[bufname];
+            ref.type = op->type;
+
+            if (op->name == Call::glsl_texture_load) {
+                ref.read = true;
+            } else if (op->name == Call::glsl_texture_store) {
+                ref.write = true;
+            }
+
+            // The Func's name and the associated .buffer are mentioned in the
+            // argument lists, but don't treat them as free variables.
+            ignore.push(bufname, 0);
+            ignore.push(bufname + ".buffer", 0);
+            Internal::Closure::visit(op);
+            ignore.pop(bufname + ".buffer");
+            ignore.pop(bufname);
+        } else {
+            Internal::Closure::visit(op);
+        }
+    }
+
     bool skip_gpu_loops;
 };
 
@@ -284,7 +327,10 @@ vector<Argument> GPU_Host_Closure::arguments() {
         if (iter->second.write) debug(2) << " (write)";
         debug(2) << "\n";
 
-        res.push_back(Argument(iter->first, true, iter->second.type));
+        Argument arg(iter->first, true, iter->second.type);
+        arg.read = iter->second.read;
+        arg.write = iter->second.write;
+        res.push_back(arg);
     }
     return res;
 }
@@ -328,9 +374,12 @@ CodeGen_GPU_Dev* CodeGen_GPU_Host<CodeGen_CPU>::make_dev(Target t)
         return new CodeGen_SPIR_Dev(t, 32);
     } else if (t.features & Target::OpenCL) {
         debug(1) << "Constructing OpenCL device codegen\n";
-        return new CodeGen_OpenCL_Dev();
+        return new CodeGen_OpenCL_Dev(t);
+    } else if (t.features & Target::OpenGL) {
+        debug(1) << "Constructing OpenGL device codegen\n";
+        return new CodeGen_OpenGL_Dev();
     } else {
-        assert(false && "Requested unknown GPU target");
+        internal_error << "Requested unknown GPU target: " << t.to_string() << "\n";
         return NULL;
     }
 }
@@ -356,22 +405,22 @@ void CodeGen_GPU_Host<CodeGen_CPU>::compile(Stmt stmt, string name,
 
     // grab runtime helper functions
     dev_malloc_fn = module->getFunction("halide_dev_malloc");
-    assert(dev_malloc_fn && "Could not find halide_dev_malloc in module");
+    internal_assert(dev_malloc_fn) << "Could not find halide_dev_malloc in module\n";
 
     dev_free_fn = module->getFunction("halide_dev_free");
-    assert(dev_free_fn && "Could not find halide_dev_free in module");
+    internal_assert(dev_free_fn) << "Could not find halide_dev_free in module\n";
 
     copy_to_host_fn = module->getFunction("halide_copy_to_host");
-    assert(copy_to_host_fn && "Could not find halide_copy_to_host in module");
+    internal_assert(copy_to_host_fn) << "Could not find halide_copy_to_host in module\n";
 
     copy_to_dev_fn = module->getFunction("halide_copy_to_dev");
-    assert(copy_to_dev_fn && "Could not find halide_copy_to_dev in module");
+    internal_assert(copy_to_dev_fn) << "Could not find halide_copy_to_dev in module\n";
 
     dev_run_fn = module->getFunction("halide_dev_run");
-    assert(dev_run_fn && "Could not find halide_dev_run in module");
+    internal_assert(dev_run_fn) << "Could not find halide_dev_run in module\n";
 
     dev_sync_fn = module->getFunction("halide_dev_sync");
-    assert(dev_sync_fn && "Could not find halide_dev_sync in module");
+    internal_assert(dev_sync_fn) << "Could not find halide_dev_sync in module\n";
 
     // Fix the target triple
     debug(1) << "Target triple of initial module: " << module->getTargetTriple() << "\n";
@@ -401,7 +450,7 @@ void CodeGen_GPU_Host<CodeGen_CPU>::compile(Stmt stmt, string name,
     Value *user_context = get_user_context();
     Value *kernel_size = ConstantInt::get(i32, kernel_src.size());
     Value *init = module->getFunction("halide_init_kernels");
-    assert(init && "Could not find function halide_init_kernels in initial module");
+    internal_assert(init) << "Could not find function halide_init_kernels in initial module\n";
     Value *state = builder->CreateCall4(init, user_context,
                                         builder->CreateLoad(get_module_state()),
                                         kernel_src_ptr, kernel_size);
@@ -438,14 +487,14 @@ void CodeGen_GPU_Host<CodeGen_CPU>::jit_init(ExecutionEngine *ee, Module *module
                 error.clear();
                 llvm::sys::DynamicLibrary::LoadLibraryPermanently("nvcuda.dll", &error);
             }
-            assert(error.empty() && "Could not find libcuda.so, libcuda.dylib, or nvcuda.dll");
+            user_assert(error.empty()) << "Could not find libcuda.so, libcuda.dylib, or nvcuda.dll\n";
         }
         lib_cuda_linked = true;
 
         // Now dig out cuCtxDestroy_v2 so that we can clean up the
         // shared context at termination
         void *ptr = llvm::sys::DynamicLibrary::SearchForAddressOfSymbol("cuCtxDestroy_v2");
-        assert(ptr && "Could not find cuCtxDestroy_v2 in cuda library");
+        internal_assert(ptr) << "Could not find cuCtxDestroy_v2 in cuda library\n";
 
         cuCtxDestroy = reinterpret_bits<int (*)(CUctx_st *)>(ptr);
 
@@ -466,7 +515,33 @@ void CodeGen_GPU_Host<CodeGen_CPU>::jit_init(ExecutionEngine *ee, Module *module
                 error.clear();
                 llvm::sys::DynamicLibrary::LoadLibraryPermanently("opencl.dll", &error); // TODO: test on Windows
             }
-            assert(error.empty() && "Could not find libopencl.so, OpenCL.framework, or opencl.dll");
+            user_assert(error.empty()) << "Could not find libopencl.so, OpenCL.framework, or opencl.dll\n";
+        }
+    } else if (target.features & Target::OpenGL) {
+        if (target.os == Target::Linux) {
+            if (have_symbol("glXGetCurrentContext") && have_symbol("glDeleteTextures")) {
+                debug(1) << "OpenGL support code already linked in...\n";
+            } else {
+                debug(1) << "Looking for OpenGL support code...\n";
+                string error;
+                llvm::sys::DynamicLibrary::LoadLibraryPermanently("libGL.so.1", &error);
+                user_assert(error.empty()) << "Could not find libGL.so\n";
+                llvm::sys::DynamicLibrary::LoadLibraryPermanently("libX11.so", &error);
+                user_assert(error.empty()) << "Could not find libX11.so\n";
+            }
+        } else if (target.os == Target::OSX) {
+            if (have_symbol("aglCreateContext") && have_symbol("glDeleteTextures")) {
+                debug(1) << "OpenGL support code already linked in...\n";
+            } else {
+                debug(1) << "Looking for OpenGL support code...\n";
+                string error;
+                llvm::sys::DynamicLibrary::LoadLibraryPermanently("/System/Library/Frameworks/AGL.framework/AGL", &error);
+                user_assert(error.empty()) << "Could not find AGL.framework\n";
+                llvm::sys::DynamicLibrary::LoadLibraryPermanently("/System/Library/Frameworks/OpenGL.framework/OpenGL", &error);
+                user_assert(error.empty()) << "Could not find OpenGL.framework\n";
+            }
+        } else {
+            internal_error << "JIT support for OpenGL on anything other than linux or OS X not yet implemented\n";
         }
     }
 }
@@ -477,36 +552,44 @@ void CodeGen_GPU_Host<CodeGen_CPU>::jit_finalize(ExecutionEngine *ee, Module *mo
         // Remap the cuda_ctx of PTX host modules to a shared location for all instances.
         // CUDA behaves much better when you don't initialize >2 contexts.
         llvm::Function *fn = module->getFunction("halide_set_cuda_context");
-        assert(fn && "Could not find halide_set_cuda_context in module");
+        internal_assert(fn) << "Could not find halide_set_cuda_context in module\n";
         void *f = ee->getPointerToFunction(fn);
-        assert(f && "Could not find compiled form of halide_set_cuda_context in module");
+        internal_assert(f) << "Could not find compiled form of halide_set_cuda_context in module\n";
         void (*set_cuda_context)(CUcontext *) =
             reinterpret_bits<void (*)(CUcontext *)>(f);
         set_cuda_context(&cuda_ctx.ptr);
 
         // When the module dies, we need to call halide_release
         fn = module->getFunction("halide_release");
-        assert(fn && "Could not find halide_release in module");
+        internal_assert(fn) << "Could not find halide_release in module\n";
         f = ee->getPointerToFunction(fn);
-        assert(f && "Could not find compiled form of halide_release in module");
+        internal_assert(f) << "Could not find compiled form of halide_release in module\n";
         void (*cleanup_routine)() =
             reinterpret_bits<void (*)()>(f);
         cleanup_routines->push_back(cleanup_routine);
     } else if (target.features & Target::OpenCL) {
         // Share the same cl_ctx, cl_q across all OpenCL modules.
         llvm::Function *fn = module->getFunction("halide_set_cl_context");
-        assert(fn && "Could not find halide_set_cl_context in module");
+        internal_assert(fn) << "Could not find halide_set_cl_context in module\n";
         void *f = ee->getPointerToFunction(fn);
-        assert(f && "Could not find compiled form of halide_set_cl_context in module");
+        internal_assert(f) << "Could not find compiled form of halide_set_cl_context in module\n";
         void (*set_cl_context)(void **, void **) =
             reinterpret_bits<void (*)(void **, void **)>(f);
         set_cl_context(&cl_ctx, &cl_q);
 
         // When the module dies, we need to call halide_release
         fn = module->getFunction("halide_release");
-        assert(fn && "Could not find halide_release in module");
+        internal_assert(fn) << "Could not find halide_release in module\n";
         f = ee->getPointerToFunction(fn);
-        assert(f && "Could not find compiled form of halide_release in module");
+        internal_assert(f) << "Could not find compiled form of halide_release in module\n";
+        void (*cleanup_routine)() =
+            reinterpret_bits<void (*)()>(f);
+        cleanup_routines->push_back(cleanup_routine);
+    } else if (target.features & Target::OpenGL) {
+        llvm::Function *fn = module->getFunction("halide_release");
+        internal_assert(fn) << "Could not find halide_release in module\n";
+        void *f = ee->getPointerToFunction(fn);
+        internal_assert(f) << "Could not find compiled form of halide_release in module\n";
         void (*cleanup_routine)() =
             reinterpret_bits<void (*)()>(f);
         cleanup_routines->push_back(cleanup_routine);
@@ -567,13 +650,8 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const For *loop) {
         // compile the kernel
         string kernel_name = unique_name("kernel_" + loop->name, false);
         for (size_t i = 0; i < kernel_name.size(); i++) {
-            switch (kernel_name[i]) {
-            case '$':
-            case '.':
+            if (!isalnum(kernel_name[i])) {
                 kernel_name[i] = '_';
-                break;
-            default:
-                break;
             }
         }
         cgdev->add_kernel(loop, kernel_name, c.arguments());
@@ -586,13 +664,17 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const For *loop) {
             Value *user_context = get_user_context();
             Value *buf = sym_get(it->first + ".buffer");
             debug(4) << "halide_dev_malloc " << it->first << "\n";
-            builder->CreateCall2(dev_malloc_fn, user_context, buf);
+            Value *result = builder->CreateCall2(dev_malloc_fn, user_context, buf);
+            Value *did_succeed = builder->CreateICmpEQ(result, ConstantInt::get(i32, 0));
+            CodeGen_CPU::create_assertion(did_succeed, "Failure inside halide_dev_malloc");
 
             // Anything dirty on the cpu that gets read on the gpu
             // needs to be copied over
             if (it->second.read) {
                 debug(4) << "halide_copy_to_dev " << it->first << "\n";
-                builder->CreateCall2(copy_to_dev_fn, user_context, buf);
+                Value *result = builder->CreateCall2(copy_to_dev_fn, user_context, buf);
+                Value *did_succeed = builder->CreateICmpEQ(result, ConstantInt::get(i32, 0));
+                CodeGen_CPU::create_assertion(did_succeed, "Failure inside halide_copy_to_dev");
             }
         }
 
@@ -669,7 +751,9 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const For *loop) {
             builder->CreateConstGEP2_32(gpu_arg_sizes_arr, 0, 0, "gpu_arg_sizes_ar_ref"),
             builder->CreateConstGEP2_32(gpu_args_arr, 0, 0, "gpu_args_arr_ref")
         };
-        builder->CreateCall(dev_run_fn, launch_args);
+        Value *result = builder->CreateCall(dev_run_fn, launch_args);
+        Value *did_succeed = builder->CreateICmpEQ(result, ConstantInt::get(i32, 0));
+        CodeGen_CPU::create_assertion(did_succeed, "Failure inside halide_dev_run");
 
         // mark written buffers dirty
         for (it = c.buffers.begin(); it != c.buffers.end(); ++it) {
@@ -715,7 +799,8 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const Allocate *alloc) {
     if (usage.used_on_device) {
         debug(2) << alloc->name << " is used on the device\n";
 
-        if (!usage.has_buffer_defined) {
+        buf = sym_get(alloc->name + ".buffer", false);
+        if (!buf) {
             buf = create_alloca_at_entry(buffer_t_type, 1);
             Value *zero32 = ConstantInt::get(i32, 0),
                 *one32  = ConstantInt::get(i32, 1),
@@ -734,8 +819,10 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const Allocate *alloc) {
             if (constant_allocation_size(alloc->extents, alloc->name, constant_size)) {
                 int64_t size_in_bytes = (int64_t)constant_size * alloc->type.bytes();
                 if (size_in_bytes > ((int64_t(1) << 31) - 1)) {
-                    std::cerr << "Total size for GPU allocation " << alloc->name << " is constant (" << size_in_bytes << ") but exceeds 2^31 - 1.";
-                    assert(false);
+                    user_error
+                        << "Total size for GPU allocation " << alloc->name
+                        << " is constant (" << size_in_bytes << ") but exceeds 2^31 - 1.";
+                    llvm_size = NULL;
                 } else {
                     // Size in elements, not size in bytes.
                     llvm_size = ConstantInt::get(i32, constant_size);
@@ -771,11 +858,14 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const Allocate *alloc) {
             sym_push(alloc->name + ".buffer", buf);
             should_pop = true;
         } else {
-            buf = sym_get(alloc->name + ".buffer");
+            Value *host_ptr = builder->CreatePointerCast(host_allocation.ptr, i8->getPointerTo());
+            builder->CreateStore(host_ptr, buffer_host_ptr(buf));
         }
 
         Value *args[2] = { get_user_context(), buf };
-        builder->CreateCall(dev_malloc_fn, args);
+        Value *result = builder->CreateCall(dev_malloc_fn, args);
+        Value *did_succeed = builder->CreateICmpEQ(result, ConstantInt::get(i32, 0));
+        CodeGen_CPU::create_assertion(did_succeed, "Failure inside halide_dev_malloc");
 
         // Put the dev pointer in the symbol table. Mostly so we
         // remember to dev_free it.
@@ -803,7 +893,9 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const Free *f) {
     if (sym_exists(f->name + ".dev")) {
         Value *args[2] = { get_user_context(),
                            sym_get(f->name + ".buffer") };
-        builder->CreateCall(dev_free_fn, args);
+        Value *result = builder->CreateCall(dev_free_fn, args);
+        Value *did_succeed = builder->CreateICmpEQ(result, ConstantInt::get(i32, 0));
+        CodeGen_CPU::create_assertion(did_succeed, "Failure inside halide_dev_free");
     }
 }
 
@@ -914,7 +1006,9 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const Pipeline *n) {
                 // of codegen.
                 if (update_usage[i].used_on_host) {
                     // debug(0) << "Before update step " << j << " copy tuple element " << i << " to host\n";
-                    builder->CreateCall2(copy_to_host_fn, user_context, bufs[i]);
+                    Value *result = builder->CreateCall2(copy_to_host_fn, user_context, bufs[i]);
+                    Value *did_succeed = builder->CreateICmpEQ(result, ConstantInt::get(i32, 0));
+                    CodeGen_CPU::create_assertion(did_succeed, "Failure inside halide_copy_to_host");
                 }
             }
 
@@ -946,7 +1040,9 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const Pipeline *n) {
     for (size_t i = 0; i < bufs.size(); i++) {
         if (consume_usage[i].read_on_host) {
             // debug(0) << "Before consume step copy tuple element " << i << " to host\n";
-            builder->CreateCall2(copy_to_host_fn, user_context, bufs[i]);
+            Value *result = builder->CreateCall2(copy_to_host_fn, user_context, bufs[i]);
+            Value *did_succeed = builder->CreateICmpEQ(result, ConstantInt::get(i32, 0));
+            CodeGen_CPU::create_assertion(did_succeed, "Failure inside halide_copy_to_host");
         }
     }
 
@@ -959,16 +1055,19 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const Call *call) {
     // calls to whole-buffer builtins like debug_to_file.
     if (call->call_type == Call::Intrinsic &&
         call->name == Call::debug_to_file) {
-        assert(call->args.size() == 9 && "malformed debug to file node");
+        internal_assert(call->args.size() == 9) << "malformed debug to file node\n";
         const Load *func = call->args[1].as<Load>();
-        assert(func && "malformed debug to file node");
+        internal_assert(func) << "malformed debug to file node\n";
 
         Value *buf = sym_get(func->name + ".buffer", false);
         if (buf) {
             // This buffer may have been last-touched on device
             Value *user_context = get_user_context();
-            builder->CreateCall2(copy_to_host_fn, user_context, buf);
+            Value *result = builder->CreateCall2(copy_to_host_fn, user_context, buf);
+            Value *did_succeed = builder->CreateICmpEQ(result, ConstantInt::get(i32, 0));
+            CodeGen_CPU::create_assertion(did_succeed, "Failure inside halide_copy_to_host");
         }
+        // fall through
     }
 
     CodeGen::visit(call);

@@ -11,9 +11,10 @@ using namespace Halide;
 void check_correctness(Image<int> hl_out, int tile);
 
 int main(int argc, char **argv) {
-    int width = 2048;
-    int height= 2048;
-    int tile  = 64;
+    int width = atoi(argv[1]);
+    int tile  = atoi(argv[2]);
+
+    int height= width;
 
     Func I("Input");
     Func S("S");

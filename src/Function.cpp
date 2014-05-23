@@ -436,8 +436,9 @@ void Function::clear_all_definitions() {
         for (size_t i = 0; i < values.size(); i++) {
             values[i].accept(&counter);
         }
-        for (size_t i = 0; i < counter.calls.size(); i++) {
+        for (int i = 0; i < counter.count; i++) {
             contents.ptr->ref_count.increment();
+            internal_assert(!contents.ptr->ref_count.is_zero());
         }
     }
     contents.ptr->reductions.clear();

@@ -4,13 +4,15 @@
 #include <iostream>
 #include <Halide.h>
 
-#define MAX_THREAD 192
-
 using namespace Halide;
 
 void check_correctness(Image<int> hl_out, int tile);
 
 int main(int argc, char **argv) {
+    if (argc < 3) {
+        std::cerr << "Provide image_width and tile_width as second and third command line args" << std::endl;
+    }
+
     int width = atoi(argv[1]);
     int tile  = atoi(argv[2]);
 
@@ -41,19 +43,24 @@ int main(int argc, char **argv) {
 
         SI.compute_at(S, Var("blockidx"));
         SI.reorder_storage(xi,yi,xo,yo);
+#if 0
+        SI.split(yi, yi, t, 6).reorder(t,xi,yi,xo,yo).gpu_threads(xi,yi);
+#else
         SI.reorder(xi,yi,xo,yo).gpu_threads(yi);
+#endif
         SI.update(0).reorder(rxi.x,yi,xo,yo).gpu_threads(yi);
         SI.update(1).reorder(ryi.x,xi,xo,yo).gpu_threads(xi);
 
         S.compute_root();
         S.split(x, xo,xi, tile).split(y, yo,yi, tile);
-        S.reorder(yi, xi, xo, yo);
-        S.gpu_blocks(xo,yo).gpu_threads(xi);
+#if 0
+        S.split(yi, yi, t, 6).reorder(t,xi,yi,xo,yo).gpu_threads(xi,yi);
+#else
+        S.reorder(yi, xi, xo, yo).gpu_threads(xi);
+#endif
+        S.gpu_blocks(xo,yo);
         S.bound(x, 0, width).bound(y, 0, height);
     }
-
-    S.trace_realizations();
-    //SI.trace_realizations();
 
     Image<int> hl_out = S.realize(width,height);
 

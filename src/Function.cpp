@@ -113,6 +113,19 @@ struct CountSelfReferences : public IRMutator {
     }
 };
 
+struct CountSelfReferencesBeforeRemoval : public IRGraphVisitor {
+    set<const Call *> calls;
+    const Function *func;
+
+    using IRVisitor::visit;
+
+    void visit(const Call *c) {
+        if (c->func.same_as(*func)) {
+            calls.insert(c);
+        }
+    }
+};
+
 // A counter to use in tagging random variables
 namespace {
 static int rand_counter = 0;
@@ -407,41 +420,45 @@ void Function::clear_all_definitions() {
     // clear the schedule
     contents.ptr->schedule = Schedule();
 
-    // clear all names
-    //contents.ptr->name.clear();
-    //contents.ptr->debug_file.clear();
-    //contents.ptr->extern_function_name.clear();
-
-    // clear all pure definitions
-    contents.ptr->args.clear();
-    contents.ptr->values.clear();
-    contents.ptr->output_types.clear();
-
-    // clear other alternative defintions
-    contents.ptr->output_buffers.clear();
-    contents.ptr->extern_arguments.clear();
-
     // clear reduction definitions
     // first increment the smart pointer the same number of times as
     // it was decremented when the reduction definitions were added
-    CountSelfReferences counter;
+    CountSelfReferencesBeforeRemoval counter;
     counter.func = this;
+
     for (size_t j = 0; j < contents.ptr->reductions.size(); j++) {
         ReductionDefinition r = contents.ptr->reductions[j];
-        std::vector<Expr> args   = r.args;
-        std::vector<Expr> values = r.values;
+        vector<Expr> args = r.args;
+        vector<Expr> values = r.values;
+
         for (size_t i = 0; i < args.size(); i++) {
             args[i].accept(&counter);
         }
         for (size_t i = 0; i < values.size(); i++) {
             values[i].accept(&counter);
         }
-        for (int i = 0; i < counter.count; i++) {
+
+        for (size_t i = 0; i < counter.calls.size(); i++) {
             contents.ptr->ref_count.increment();
-            internal_assert(!contents.ptr->ref_count.is_zero());
+            internal_assert(!contents.ptr->ref_count.is_zero())
+                << "Removed too many circular references when defining reduction.\n";
         }
     }
     contents.ptr->reductions.clear();
+
+    // clear other alternative defintions
+    contents.ptr->output_buffers.clear();
+    contents.ptr->extern_arguments.clear();
+
+    // clear all pure definitions
+    contents.ptr->args.clear();
+    contents.ptr->values.clear();
+    contents.ptr->output_types.clear();
+
+    // clear all names
+    //contents.ptr->name.clear();
+    //contents.ptr->debug_file.clear();
+    //contents.ptr->extern_function_name.clear();
 }
 
 }

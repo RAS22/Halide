@@ -6,7 +6,7 @@
 
 using namespace Halide;
 
-void check_correctness(Image<int> hl_out, int tile);
+void check_correctness(Image<float> hl_out, Image<float> in, int tile);
 
 int main(int argc, char **argv) {
     if (argc < 3) {
@@ -17,6 +17,19 @@ int main(int argc, char **argv) {
     int tile  = atoi(argv[2]);
 
     int height= width;
+
+    // input image
+    Image<float> in(width,height);
+    for (int y=0; y<height/tile; y++) {
+        for (int x=0; x<width/tile; x++) {
+            for (int v=0; v<tile; v++) {
+                for (int u=0; u<tile; u++) {
+                    in(x*tile+u, y*tile+v) = float(rand() % 10);
+                }
+            }
+        }
+    }
+
 
     Func I("Input");
     Func S("S");
@@ -29,58 +42,50 @@ int main(int argc, char **argv) {
     RDom rxi(1, tile-1, "rxi");     // prefix sums within tiles
     RDom ryi(1, tile-1, "ryi");
 
-    I(x,y) = 1;
+    I(x,y) = in(x,y);
 
-    SI(xo,xi,yo,yi)   = I(xo*tile+xi, yo*tile+yi);  // divide image into tiles
-    SI(xo,rxi,yo,yi) += SI(xo, rxi-1, yo, yi);      // x prefix sum within each tile
-    SI(xo,xi,yo,ryi) += SI(xo, xi, yo, ryi-1);      // y prefix sum within each tile
+    SI(xi ,xo,yi ,yo) = I(xo*tile+xi, yo*tile+yi);
+    SI(rxi,xo,yi ,yo) = SI(rxi,xo,yi ,yo) + SI(rxi, xo, yi, yo);
+    SI(xi ,xo,ryi,yo) = SI(xi ,xo,ryi,yo) + SI(xi, xo, ryi, yo);
 
-    S(x,y) = SI(x/tile, x%tile, y/tile, y%tile);    // final image
+    S(x,y) = SI(x%tile, x/tile, y%tile, y/tile);    // final image
 
     Target target = get_jit_target_from_environment();
     if (target.has_gpu_feature() || (target.features & Target::GPUDebug)) {
         Var t("t");
 
-        SI.compute_at(S, Var("blockidx"));
-        SI.reorder_storage(xi,yi,xo,yo);
-#if 0
+        SI.compute_at(S, Var("__block_id_x"));
         SI.split(yi, yi, t, 6).reorder(t,xi,yi,xo,yo).gpu_threads(xi,yi);
-#else
-        SI.reorder(xi,yi,xo,yo).gpu_threads(yi);
-#endif
         SI.update(0).reorder(rxi.x,yi,xo,yo).gpu_threads(yi);
         SI.update(1).reorder(ryi.x,xi,xo,yo).gpu_threads(xi);
 
         S.compute_root();
+        S.reorder_storage(y, x);
         S.split(x, xo,xi, tile).split(y, yo,yi, tile);
-#if 0
         S.split(yi, yi, t, 6).reorder(t,xi,yi,xo,yo).gpu_threads(xi,yi);
-#else
-        S.reorder(yi, xi, xo, yo).gpu_threads(xi);
-#endif
         S.gpu_blocks(xo,yo);
         S.bound(x, 0, width).bound(y, 0, height);
     }
 
-    Image<int> hl_out = S.realize(width,height);
+    Image<float> hl_out = S.realize(width,height);
 
-    check_correctness(hl_out, tile);
+    check_correctness(hl_out, in, tile);
 
     return 0;
 }
 
-void check_correctness(Image<int> hl_out, int tile) {
+void check_correctness(Image<float> hl_out, Image<float> in, int tile) {
     int width = hl_out.width();
     int height = hl_out.height();
 
-    Image<int> diff(width,height);
-    Image<int> ref(width,height);
+    Image<float> diff(width,height);
+    Image<float> ref(width,height);
 
     for (int y=0; y<height/tile; y++) {
         for (int x=0; x<width/tile; x++) {
             for (int v=0; v<tile; v++) {
                 for (int u=0; u<tile; u++) {
-                    ref(x*tile+u, y*tile+v) = 1; // input image is all 1
+                    ref(x*tile+u, y*tile+v) = in(x*tile+u, y*tile+v);
                 }
             }
         }
@@ -106,7 +111,7 @@ void check_correctness(Image<int> hl_out, int tile) {
         }
     }
 
-    int diff_sum = 0;
+    float diff_sum = 0;
     for (int y=0; y<height; y++) {
         for (int x=0; x<width; x++) {
             diff(x,y) = ref(x,y) - hl_out(x,y);

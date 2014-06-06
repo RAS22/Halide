@@ -363,8 +363,6 @@ const string kernel_preamble = "";
 }
 
 void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::add_kernel(Stmt s, string name, const vector<Argument> &args) {
-    cache.clear();
-
     debug(2) << "Adding OpenCL kernel " << name << "\n";
 
     stream << kernel_preamble;
@@ -388,11 +386,11 @@ void CodeGen_OpenCL_Dev::CodeGen_OpenCL_C::add_kernel(Stmt s, string name, const
     }
     stream << ",\n" << "__local ulong* __shared";
 
-    stream << ") {\n";
+    stream << ")\n";
 
+    open_scope();
     print(s);
-
-    stream << "}\n";
+    close_scope("kernel " + name);
 
     for (size_t i = 0; i < args.size(); i++) {
         // Remove buffer arguments from allocation scope
@@ -450,7 +448,7 @@ void CodeGen_OpenCL_Dev::init_module() {
                << "#define tanh_f32 tanh \n"
                << "#define atanh_f32 atanh \n"
                << "int halide_gpu_thread_barrier() {\n"
-               << "  barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);\n"
+               << "  barrier(CLK_LOCAL_MEM_FENCE);\n" // Halide only ever needs local memory fences.
                << "  return 0;\n"
                << "}\n";
 

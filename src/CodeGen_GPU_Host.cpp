@@ -178,7 +178,7 @@ public:
         return c;
     }
 
-    vector<Argument> arguments();
+    vector<GPU_Argument> arguments();
 
 protected:
     using Internal::Closure::visit;
@@ -215,19 +215,19 @@ protected:
     bool skip_gpu_loops;
 };
 
-vector<Argument> GPU_Host_Closure::arguments() {
-    vector<Argument> res;
+vector<GPU_Argument> GPU_Host_Closure::arguments() {
+    vector<GPU_Argument> res;
     for (map<string, Type>::const_iterator iter = vars.begin(); iter != vars.end(); ++iter) {
         debug(2) << "var: " << iter->first << "\n";
-        res.push_back(Argument(iter->first, false, iter->second));
+        res.push_back(GPU_Argument(iter->first, false, iter->second));
     }
     for (map<string, BufferRef>::const_iterator iter = buffers.begin(); iter != buffers.end(); ++iter) {
-        debug(2) << "buffer: " << iter->first;
+        debug(2) << "buffer: " << iter->first << " " << iter->second.size;
         if (iter->second.read) debug(2) << " (read)";
         if (iter->second.write) debug(2) << " (write)";
         debug(2) << "\n";
 
-        Argument arg(iter->first, true, iter->second.type);
+        GPU_Argument arg(iter->first, true, iter->second.type, iter->second.size);
         arg.read = iter->second.read;
         arg.write = iter->second.write;
         res.push_back(arg);
@@ -265,7 +265,7 @@ CodeGen_GPU_Dev* CodeGen_GPU_Host<CodeGen_CPU>::make_dev(Target t)
         return new CodeGen_OpenCL_Dev(t);
     } else if (t.features & Target::OpenGL) {
         debug(1) << "Constructing OpenGL device codegen\n";
-        return new CodeGen_OpenGL_Dev();
+        return new CodeGen_OpenGL_Dev(t);
     } else {
         internal_error << "Requested unknown GPU target: " << t.to_string() << "\n";
         return NULL;
@@ -302,7 +302,6 @@ void CodeGen_GPU_Host<CodeGen_CPU>::compile(Stmt stmt, string name,
 
     debug(1) << "Target triple of initial module: " << module->getTargetTriple() << "\n";
 
-
     // Pass to the generic codegen
     CodeGen::compile(stmt, name, args, images_to_embed);
 
@@ -317,16 +316,25 @@ void CodeGen_GPU_Host<CodeGen_CPU>::compile(Stmt stmt, string name,
 
     Value *kernel_src_ptr = CodeGen_CPU::create_constant_binary_blob(kernel_src, "halide_kernel_src");
 
-    // Jump to the start of the function and insert a call to halide_init_kernels
-    builder->SetInsertPoint(function->getEntryBlock().getFirstInsertionPt());
+    // Remember the entry block so we can branch to it upon init success.
+    BasicBlock *entry = &function->getEntryBlock();
+
+    // Insert a new block to run initialization at the beginning of the function.
+    BasicBlock *init_kernels_bb = BasicBlock::Create(*context, "init_kernels",
+                                                     function, entry);
+    builder->SetInsertPoint(init_kernels_bb);
     Value *user_context = get_user_context();
     Value *kernel_size = ConstantInt::get(i32, kernel_src.size());
     Value *init = module->getFunction("halide_init_kernels");
     internal_assert(init) << "Could not find function halide_init_kernels in initial module\n";
-    Value *state = builder->CreateCall4(init, user_context,
-                                        builder->CreateLoad(get_module_state()),
-                                        kernel_src_ptr, kernel_size);
-    builder->CreateStore(state, get_module_state());
+    Value *result = builder->CreateCall4(init, user_context,
+                                         get_module_state(),
+                                         kernel_src_ptr, kernel_size);
+    Value *did_succeed = builder->CreateICmpEQ(result, ConstantInt::get(i32, 0));
+    CodeGen_CPU::create_assertion(did_succeed, "Failure inside halide_init_kernels");
+
+    // Upon success, jump to the original entry.
+    builder->CreateBr(entry);
 
     // Optimize the module
     CodeGen::optimize_module();
@@ -495,7 +503,15 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const For *loop) {
                 kernel_name[i] = '_';
             }
         }
-        cgdev->add_kernel(loop, kernel_name, c.arguments());
+
+        vector<GPU_Argument> arguments = c.arguments();
+        for (size_t i = 0; i < arguments.size(); i++) {
+            if (arguments[i].is_buffer && allocations.contains(arguments[i].name)) {
+                arguments[i].size = allocations.get(arguments[i].name).stack_size;
+            }
+        }
+
+        cgdev->add_kernel(loop, kernel_name, arguments);
 
         // get the actual name of the generated kernel for this loop
         kernel_name = cgdev->get_current_kernel_name();
@@ -505,7 +521,7 @@ void CodeGen_GPU_Host<CodeGen_CPU>::visit(const For *loop) {
         llvm::Type *target_size_t_type = (target.bits == 32) ? i32 : i64;
 
         // build the kernel arguments array
-        vector<Argument> closure_args = c.arguments();
+        vector<GPU_Argument> closure_args = c.arguments();
         llvm::PointerType *arg_t = i8->getPointerTo(); // void*
         int num_args = (int)closure_args.size();
 

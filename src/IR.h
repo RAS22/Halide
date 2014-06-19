@@ -1115,6 +1115,7 @@ struct Variable : public ExprNode<Variable> {
     }
 
     static Expr make(Type type, std::string name, Buffer image, Parameter param, ReductionDomain reduction_domain) {
+        internal_assert(!name.empty());
         Variable *node = new Variable;
         node->type = type;
         node->name = name;

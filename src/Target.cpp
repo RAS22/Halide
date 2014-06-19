@@ -367,6 +367,7 @@ llvm::Module *parse_bitcode_file(llvm::MemoryBuffer *bitcode_buffer, llvm::LLVMC
 DECLARE_CPP_INITMOD(android_clock)
 DECLARE_CPP_INITMOD(android_host_cpu_count)
 DECLARE_CPP_INITMOD(android_io)
+DECLARE_CPP_INITMOD(android_opengl_context)
 DECLARE_CPP_INITMOD(ios_io)
 DECLARE_CPP_INITMOD(cuda)
 DECLARE_CPP_INITMOD(cuda_debug)
@@ -397,6 +398,7 @@ DECLARE_CPP_INITMOD(posix_thread_pool)
 DECLARE_CPP_INITMOD(windows_thread_pool)
 DECLARE_CPP_INITMOD(tracing)
 DECLARE_CPP_INITMOD(write_debug_image)
+DECLARE_CPP_INITMOD(posix_print)
 
 DECLARE_LL_INITMOD(arm)
 DECLARE_LL_INITMOD(posix_math)
@@ -454,6 +456,8 @@ void link_modules(std::vector<llvm::Module *> &modules) {
                        "halide_host_cpu_count",
                        "halide_opengl_get_proc_address",
                        "halide_opengl_create_context",
+                       "halide_set_custom_print",
+                       "halide_print",
                        "__stack_chk_guard",
                        "__stack_chk_fail",
                        ""};
@@ -546,6 +550,7 @@ llvm::Module *get_initial_module_for_target(Target t, llvm::LLVMContext *c) {
     modules.push_back(get_initmod_write_debug_image(c, bits_64));
     modules.push_back(get_initmod_posix_allocator(c, bits_64));
     modules.push_back(get_initmod_posix_error_handler(c, bits_64));
+    modules.push_back(get_initmod_posix_print(c, bits_64));
 
     // These modules are optional
     if (t.arch == Target::X86) {
@@ -582,6 +587,8 @@ llvm::Module *get_initial_module_for_target(Target t, llvm::LLVMContext *c) {
             modules.push_back(get_initmod_linux_opengl_context(c, bits_64));
         } else if (t.os == Target::OSX) {
             modules.push_back(get_initmod_osx_opengl_context(c, bits_64));
+        } else if (t.os == Target::Android) {
+            modules.push_back(get_initmod_android_opengl_context(c, bits_64));
         } else {
             // You're on your own to provide definitions of halide_opengl_get_proc_address and halide_opengl_create_context
         }
@@ -625,6 +632,13 @@ llvm::Module *get_initial_module_for_ptx_device(llvm::LLVMContext *c) {
         if (!f->isDeclaration() && !f->hasFnAttribute(llvm::Attribute::NoInline)) {
             f->setLinkage(llvm::GlobalValue::AvailableExternallyLinkage);
         }
+
+        // Also mark the halide_gpu_thread_barrier as noduplicate.
+        #if LLVM_VERSION > 32
+        if (f->getName() == "halide_gpu_thread_barrier") {
+            f->addFnAttr(llvm::Attribute::NoDuplicate);
+        }
+        #endif
     }
 
     return modules[0];

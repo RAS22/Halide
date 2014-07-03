@@ -130,6 +130,7 @@ EXPORT void match_types(Expr &a, Expr &b);
 // @{
 EXPORT Expr halide_log(Expr a);
 EXPORT Expr halide_exp(Expr a);
+EXPORT Expr halide_erf(Expr a);
 // @}
 
 /** Raise an expression to an integer power by repeatedly multiplying
@@ -688,6 +689,16 @@ inline Expr log(Expr x) {
     }
 }
 
+/** Return the error-function (erf) of a floating-point expression. Unlike
+ * Halide::exp and Halide::log, this does not call the system erf function
+ * because many systems do not provide a standard implementation of erf. So
+ * all arguments, including Float(64) are cast to Float(32). This function
+ * is accurate up to the 5 digits of the mantissa. Vectorizes cleanly. */
+inline Expr erf(Expr x) {
+    user_assert(x.defined()) << "erf of undefined Expr\n";
+    return Internal::halide_erf(cast<float>(x));
+}
+
 /** Return one floating point expression raised to the power of
  * another. The type of the result is given by the type of the first
  * argument. If the first argument is not a floating-point type, it is
@@ -721,6 +732,12 @@ EXPORT Expr fast_log(Expr x);
  * accurate up to the last 5 bits of the mantissa. Gets worse when
  * approaching overflow. Vectorizes cleanly. */
 EXPORT Expr fast_exp(Expr x);
+
+/** Fast approximate cleanly vectorizable erf for Float(32). Returns
+ * nonsense for inputs that would overflow or underflow. Typically
+ * accurate up to the last 5 bits of the mantissa. Gets worse when
+ * approaching overflow. Vectorizes cleanly. */
+EXPORT Expr fast_erf(Expr x);
 
 /** Fast approximate cleanly vectorizable pow for Float(32). Returns
  * nonsense for x < 0.0f. Accurate up to the last 5 bits of the

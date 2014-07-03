@@ -385,6 +385,34 @@ Expr halide_exp(Expr x_full) {
     return result;
 }
 
+Expr halide_erf(Expr x_full) {
+    internal_assert(x_full.type() == Float(32));
+
+    // Keep this code if erf is avaialble on all platforms
+    //if (is_const(x_full)) {
+    //    x_full = simplify(x_full);
+    //    const float * f = as_const_float(x_full);
+    //    if (f) {
+    //        return erf(*f);
+    //    }
+    //}
+
+    float a1 =  0.254829592f;
+    float a2 = -0.284496736f;
+    float a3 =  1.421413741f;
+    float a4 = -1.453152027f;
+    float a5 =  1.061405429f;
+    float p  =  0.3275911f;
+
+    Expr sign = select(x_full<0, -1.0f, 1.0f);
+    Expr x = abs(x_full);
+    Expr t = 1.0f/(1.0f + p*x);
+    Expr y = 1.0f - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*halide_exp(-x*x);
+
+    return simplify(sign*y);
+}
+
+
 Expr raise_to_integer_power(Expr e, int p) {
     Expr result;
     if (p == 0) {
@@ -453,6 +481,24 @@ Expr fast_exp(Expr x_full) {
     return result;
 }
 
+Expr fast_erf(Expr x_full) {
+    user_assert(x_full.type() == Float(32)) << "fast_erf only works for Float(32)";
+
+    float a1 =  0.254829592f;
+    float a2 = -0.284496736f;
+    float a3 =  1.421413741f;
+    float a4 = -1.453152027f;
+    float a5 =  1.061405429f;
+    float p  =  0.3275911f;
+
+    Expr sign = select(x_full<0, -1.0f, 1.0f);
+    Expr x = abs(x_full);
+    Expr t = 1.0f/(1.0f + p*x);
+    Expr y = 1.0f - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*fast_exp(-x*x);
+
+    return simplify(sign*y);
+}
+
 Expr print(const std::vector<Expr> &args) {
     std::vector<Expr> printf_args;
     // Generate a format string.
@@ -462,7 +508,7 @@ Expr print(const std::vector<Expr> &args) {
             sstr << "%f ";
             printf_args.push_back(cast(Float(64), args[i]));
         } else if (const Internal::StringImm *s =
-                   args[i].as<Internal::StringImm>()) {
+                args[i].as<Internal::StringImm>()) {
             sstr << s->value << " ";
         } else if (args[i].type().is_handle()) {
             sstr << "%p ";

@@ -390,6 +390,9 @@ public:
 
         stmt = s->body;
         op->body.accept(this);
+
+        expr = s->condition;
+        op->condition.accept(this);
     }
 
     void visit(const Realize *op) {
@@ -421,6 +424,9 @@ public:
 
             stmt = s->body;
             op->body.accept(this);
+
+            expr = s->condition;
+            op->condition.accept(this);
         }
     }
 

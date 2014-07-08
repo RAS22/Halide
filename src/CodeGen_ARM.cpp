@@ -130,11 +130,7 @@ CodeGen_ARM::CodeGen_ARM(Target t) : CodeGen_Posix(t) {
     if (t.bits == 32) {
         user_assert(llvm_ARM_enabled) << "llvm build not configured with ARM target enabled\n.";
     } else {
-        if (t.features & Target::AArch64Backend) {
-            user_assert(llvm_AArch64_enabled) << "llvm build not configured with AArch64 target enabled.\n";
-        } else {
-            user_assert(llvm_ARM64_enabled) << "llvm build not configured with ARM64 target enabled.\n";
-        }
+        user_assert(llvm_AArch64_enabled) << "llvm build not configured with AArch64 target enabled.\n";
     }
 
     #if !(WITH_NATIVE_CLIENT)
@@ -341,19 +337,11 @@ llvm::Triple CodeGen_ARM::get_target_triple() const {
         }
     } else {
         user_assert(target.bits == 64) << "Target bits must be 32 or 64\n";
-        if (target.features & Target::AArch64Backend) {
-            #if (WITH_AARCH64)
-            triple.setArch(llvm::Triple::aarch64);
-            #else
-            user_error << "AArch64 llvm target not enabled in this build of Halide\n";
-            #endif
-        } else {
-            #if (WITH_ARM64)
-            triple.setArch(llvm::Triple::arm64);
-            #else
-            user_error << "ARM64 llvm target not enabled in this build of Halide\n";
-            #endif
-        }
+        #if (WITH_AARCH64)
+        triple.setArch(llvm::Triple::aarch64);
+        #else
+        user_error << "AArch64 llvm target not enabled in this build of Halide\n";
+        #endif
     }
 
     if (target.os == Target::Android) {
@@ -680,19 +668,13 @@ void CodeGen_ARM::visit(const Div *op) {
     bool power_of_two = is_const_power_of_two(op->b, &shift_amount);
 
     vector<Expr> matches;
-    if (op->type == Float(32, 4) && is_one(op->a)) {
+    if ((op->type == Float(32, 2) || op->type == Float(32, 4)) && is_one(op->a)) {
         // Reciprocal and reciprocal square root
-        if (expr_match(Call::make(Float(32, 4), "sqrt_f32", vec(wild_f32x4), Call::Extern), op->b, matches)) {
-            value = call_intrin(Float(32, 4), "vrsqrte.v4f32", matches);
+        Expr w = Variable::make(op->type, "*");
+        if (expr_match(Call::make(op->type, "sqrt_f32", vec(w), Call::Extern), op->b, matches)) {
+            value = codegen(Call::make(op->type, "inverse_sqrt_f32", matches, Call::Extern));
         } else {
-            value = call_intrin(Float(32, 4), "vrecpe.v4f32", vec(op->b));
-        }
-    } else if (op->type == Float(32, 2) && is_one(op->a)) {
-        // Reciprocal and reciprocal square root
-        if (expr_match(Call::make(Float(32, 2), "sqrt_f32", vec(wild_f32x2), Call::Extern), op->b, matches)) {
-            value = call_intrin(Float(32, 2), "vrsqrte.v2f32", matches);
-        } else {
-            value = call_intrin(Float(32, 2), "vrecpe.v2f32", vec(op->b));
+            value = codegen(Call::make(op->type, "inverse_f32", vec(op->b), Call::Extern));
         }
     } else if (power_of_two && op->type.is_int()) {
         Value *numerator = codegen(op->a);

@@ -334,19 +334,16 @@ void CodeGen_X86::visit(const Div *op) {
     bool power_of_two = is_const_power_of_two(op->b, &shift_amount);
 
     vector<Expr> matches;
-    if (op->type == Float(32, 4) && is_one(op->a)) {
+    if (is_one(op->a) &&
+        (op->type == Float(32, 4) ||
+         ((target.features & Target::AVX) &&
+          op->type == Float(32, 8)))) {
         // Reciprocal and reciprocal square root
-        if (expr_match(Call::make(Float(32, 4), "sqrt_f32", vec(wild_f32x4), Call::Extern), op->b, matches)) {
-            value = call_intrin(Float(32, 4), "sse.rsqrt.ps", matches);
+        Expr w = Variable::make(op->type, "*");
+        if (expr_match(Call::make(op->type, "sqrt_f32", vec(w), Call::Extern), op->b, matches)) {
+            value = codegen(Call::make(op->type, "inverse_sqrt_f32", matches, Call::Extern));
         } else {
-            value = call_intrin(Float(32, 4), "sse.rcp.ps", vec(op->b));
-        }
-    } else if ((target.features & Target::AVX) && op->type == Float(32, 8) && is_one(op->a)) {
-        // Reciprocal and reciprocal square root
-        if (expr_match(Call::make(Float(32, 8), "sqrt_f32", vec(wild_f32x8), Call::Extern), op->b, matches)) {
-            value = call_intrin(Float(32, 8), "avx.rsqrt.ps.256", matches);
-        } else {
-            value = call_intrin(Float(32, 8), "avx.rcp.ps.256", vec(op->b));
+            value = codegen(Call::make(op->type, "inverse_f32", vec(op->b), Call::Extern));
         }
     } else if (power_of_two && op->type.is_int()) {
         Value *numerator = codegen(op->a);
@@ -578,8 +575,8 @@ void CodeGen_X86::test() {
     Stmt loop = Store::make("buf", e, x + i);
     loop = LetStmt::make("x", beta+1, loop);
     // Do some local allocations within the loop
-    loop = Allocate::make("tmp_stack", Int(32), vec(Expr(127)), Block::make(loop, Free::make("tmp_stack")));
-    loop = Allocate::make("tmp_heap", Int(32), vec(Expr(43), Expr(beta)), Block::make(loop, Free::make("tmp_heap")));
+    loop = Allocate::make("tmp_stack", Int(32), vec(Expr(127)), const_true(), Block::make(loop, Free::make("tmp_stack")));
+    loop = Allocate::make("tmp_heap", Int(32), vec(Expr(43), Expr(beta)), const_true(), Block::make(loop, Free::make("tmp_heap")));
     loop = For::make("i", -1, 3, For::Parallel, loop);
 
     Stmt s = Block::make(init, loop);
@@ -676,7 +673,22 @@ string CodeGen_X86::mcpu() const {
 }
 
 string CodeGen_X86::mattrs() const {
-    return "";
+    std::string features;
+    std::string separator;
+    if (target.features & Target::FMA) {
+        features += "+fma";
+        separator = " ";
+    }
+    if (target.features & Target::FMA4) {
+        features += separator + "+fma4";
+        separator = " ";
+    }
+    if (target.features & Target::F16C) {
+        features += separator + "+f16c";
+        separator = " ";
+    }
+
+    return features;
 }
 
 bool CodeGen_X86::use_soft_float_abi() const {

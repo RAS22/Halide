@@ -356,7 +356,11 @@ llvm::Module *parse_bitcode_file(llvm::MemoryBuffer *bitcode_buffer, llvm::LLVMC
     }
 
 #define DECLARE_NO_INITMOD(mod)                                         \
-    llvm::Module *get_initmod_##mod(LLVMContext *context) {             \
+    llvm::Module *get_initmod_##mod(llvm::LLVMContext *, bool) {             \
+        user_error << "Halide was compiled without support for this target\n"; \
+        return NULL;                                                    \
+    }                                                                   \
+    llvm::Module *get_initmod_##mod##_ll(llvm::LLVMContext *) {         \
         user_error << "Halide was compiled without support for this target\n"; \
         return NULL;                                                    \
     }
@@ -412,7 +416,16 @@ DECLARE_CPP_INITMOD(tracing)
 DECLARE_CPP_INITMOD(write_debug_image)
 DECLARE_CPP_INITMOD(posix_print)
 
+#ifdef WITH_ARM
 DECLARE_LL_INITMOD(arm)
+#else
+DECLARE_NO_INITMOD(arm)
+#endif
+#ifdef WITH_AARCH64
+DECLARE_LL_INITMOD(aarch64)
+#else
+DECLARE_NO_INITMOD(aarch64)
+#endif
 DECLARE_LL_INITMOD(posix_math)
 DECLARE_LL_INITMOD(pnacl_math)
 DECLARE_LL_INITMOD(win32_math)
@@ -622,7 +635,11 @@ llvm::Module *get_initial_module_for_target(Target t, llvm::LLVMContext *c) {
         modules.push_back(get_initmod_x86_ll(c));
     }
     if (t.arch == Target::ARM) {
-        modules.push_back(get_initmod_arm_ll(c));
+        if (t.bits == 64) {
+          modules.push_back(get_initmod_aarch64_ll(c));
+        } else {
+          modules.push_back(get_initmod_arm_ll(c));
+        }
     }
     if (t.features & Target::SSE41) {
         modules.push_back(get_initmod_x86_sse41_ll(c));

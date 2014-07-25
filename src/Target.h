@@ -35,7 +35,7 @@ struct Target {
                    SSE41     = 1 << 1,  ///< Use SSE 4.1 and earlier instructions. Only relevant on x86.
                    AVX       = 1 << 2,  ///< Use AVX 1 instructions. Only relevant on x86.
                    AVX2      = 1 << 3,  ///< Use AVX 2 instructions. Only relevant on x86.
-                   CUDA      = 1 << 4,  ///< Enable the CUDA runtime.
+                   CUDA      = 1 << 4,  ///< Enable the CUDA runtime. Defaults to compute capability 2.0 (Fermi)
                    OpenCL    = 1 << 5,  ///< Enable the OpenCL runtime.
                    OpenGL    = 1 << 6,  ///< Enable the OpenGL runtime.
                    GPUDebug  = 1 << 7,  ///< Increase the level of checking and the verbosity of the gpu runtimes.
@@ -43,9 +43,13 @@ struct Target {
                    NoBoundsQuery = 1 << 9, ///< Disable the bounds querying functionality.
                    ARMv7s    = 1 << 10,  ///< Generate code for ARMv7s. Only relevant for 32-bit ARM.
                    CLDoubles = 1 << 11, ///< Enable double support on OpenCL targets
-                   FMA       = 1 << 12, /// Enable x86 FMA instruction
-                   FMA4      = 1 << 13, /// Enable x86 (AMD) FMA4 instruction set
-                   F16C      = 1 << 14  /// Enable x86 16-bit float support
+                   FMA       = 1 << 12, ///< Enable x86 FMA instruction
+                   FMA4      = 1 << 13, ///< Enable x86 (AMD) FMA4 instruction set
+                   F16C      = 1 << 14, ///< Enable x86 16-bit float support
+                   CUDACapability30    = 1 << 15, ///< Enable CUDA compute capability 3.0 (Kepler)
+                   CUDACapability32    = 1 << 16, ///< Enable CUDA compute capability 3.2 (Tegra K1)
+                   CUDACapability35    = 1 << 17, ///< Enable CUDA compute capability 3.5 (Kepler)
+                   CUDACapability50    = 1 << 18  ///< Enable CUDA compute capability 5.0 (Maxwell)
     };
 
     /** A bitmask that stores the active features. */
@@ -54,8 +58,12 @@ struct Target {
     Target() : os(OSUnknown), arch(ArchUnknown), bits(0), features(0) {}
     Target(OS o, Arch a, int b, uint64_t f) : os(o), arch(a), bits(b), features(f) {}
 
+    /** Is OpenCL or CUDA enabled in this target? I.e. is
+     * Func::gpu_tile and similar going to work? We do not include
+     * OpenGL, because it is not capable of gpgpu, and is not
+     * scheduled via Func::gpu_tile. */
     bool has_gpu_feature() const {
-        return (features & (CUDA|OpenCL));
+        return (features & (CUDA|OpenCL)) != 0;
     }
 
     bool operator==(const Target &other) const {
@@ -142,7 +150,7 @@ namespace Internal {
 llvm::Module *get_initial_module_for_target(Target, llvm::LLVMContext *);
 
 /** Create an llvm module containing the support code for ptx device. */
-llvm::Module *get_initial_module_for_ptx_device(llvm::LLVMContext *c);
+llvm::Module *get_initial_module_for_ptx_device(Target, llvm::LLVMContext *c);
 
 }
 

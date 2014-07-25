@@ -84,6 +84,7 @@ CodeGen::CodeGen(Target t) :
     function(NULL), context(NULL),
     builder(NULL),
     value(NULL),
+    very_likely_branch(NULL),
     target(t),
     void_t(NULL), i1(NULL), i8(NULL), i16(NULL), i32(NULL), i64(NULL),
     f16(NULL), f32(NULL), f64(NULL),
@@ -127,6 +128,10 @@ void CodeGen::init_module() {
 
     context = new LLVMContext();
     builder = new IRBuilder<>(*context);
+
+    // Branch weights for very likely branches
+    llvm::MDBuilder md_builder(*context);
+    very_likely_branch = md_builder.createBranchWeights(1 << 30, 0);
 
     // Define some types
     void_t = llvm::Type::getVoidTy(*context);
@@ -1290,7 +1295,9 @@ bool CodeGen::function_takes_user_context(const string &name) {
         "halide_profiling_timer",
         "halide_release",
         "halide_start_clock",
-        "halide_trace"
+        "halide_trace",
+        "halide_memoization_cache_lookup",
+        "halide_memoization_cache_store"
     };
     const int num_funcs = sizeof(user_context_runtime_funcs) /
         sizeof(user_context_runtime_funcs[0]);
@@ -1706,6 +1713,16 @@ void CodeGen::visit(const Call *op) {
 
                 value = phi;
             }
+        } else if (op->name == Call::memoize_expr) {
+            // Used as an annotation for caching, should be invisible to
+            // codegen. Ignore arguments beyond the first as they are only
+            // used in the cache key.
+            internal_assert(op->args.size() > 0);
+            value = codegen(op->args[0]);
+        } else if (op->name == Call::copy_memory) {
+            value = builder->CreateMemCpy(codegen(op->args[0]),
+                                          codegen(op->args[1]),
+                                          codegen(op->args[2]), 0);
         } else {
             internal_error << "Unknown intrinsic: " << op->name << "\n";
         }
@@ -1936,7 +1953,7 @@ void CodeGen::create_assertion(Value *cond, const string &message, const vector<
     BasicBlock *assert_succeeds_bb = BasicBlock::Create(*context, "assert succeeded: " + message, function);
 
     // If the condition fails, enter the assert body, otherwise, enter the block after
-    builder->CreateCondBr(cond, assert_succeeds_bb, assert_fails_bb);
+    builder->CreateCondBr(cond, assert_succeeds_bb, assert_fails_bb, very_likely_branch);
 
     // Build the failure case
     builder->SetInsertPoint(assert_fails_bb);
@@ -1999,7 +2016,7 @@ void CodeGen::visit(const For *op) {
 
         // If min < max, fall through to the loop bb
         Value *enter_condition = builder->CreateICmpSLT(min, max);
-        builder->CreateCondBr(enter_condition, loop_bb, after_bb);
+        builder->CreateCondBr(enter_condition, loop_bb, after_bb, very_likely_branch);
         builder->SetInsertPoint(loop_bb);
 
         // Make our phi node.
@@ -2032,7 +2049,7 @@ void CodeGen::visit(const For *op) {
 
         // Find every symbol that the body of this loop refers to
         // and dump it into a closure
-        Closure closure = Closure::make(op->body, op->name, buffer_t_type);
+        Closure closure(op->body, op->name, buffer_t_type);
 
         // Allocate a closure
         StructType *closure_t = closure.build_type(context);
@@ -2059,7 +2076,7 @@ void CodeGen::visit(const For *op) {
 
         // Make a new scope to use
         Scope<Value *> saved_symbol_table;
-        std::swap(symbol_table, saved_symbol_table);
+        symbol_table.swap(saved_symbol_table);
 
         // Get the function arguments
 
@@ -2101,7 +2118,7 @@ void CodeGen::visit(const For *op) {
         debug(3) << "Leaving parallel for loop over " << op->name << "\n";
 
         // Now restore the scope
-        std::swap(symbol_table, saved_symbol_table);
+        symbol_table.swap(saved_symbol_table);
         function = containing_function;
 
         // Check for success

@@ -115,6 +115,12 @@ public:
     Schedule(const Schedule &other) : contents(other.contents) {}
     EXPORT Schedule();
 
+    /** This flag is set to true if the schedule is memoized. */
+    // @{
+    bool &memoized();
+    bool memoized() const;
+    // @}
+
     /** This flag is set to true if the dims list has been manipulated
      * by the user (or if a ScheduleHandle was created that could have
      * been used to manipulate it). It controls the warning that
@@ -126,8 +132,7 @@ public:
     // @}
 
     /** The traversal of the domain of a function can have some of its
-     * dimensions split into sub-dimensions. See
-     * \ref ScheduleHandle::split */
+     * dimensions split into sub-dimensions. See ScheduleHandle::split */
     // @{
     const std::vector<Split> &splits() const;
     std::vector<Split> &splits();

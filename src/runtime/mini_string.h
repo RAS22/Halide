@@ -1,7 +1,7 @@
 #ifndef MINI_STRING_H
 #define MINI_STRING_H
 
-#include "mini_stdint.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +14,7 @@ char *strstr(const char* s, const char* t);
 char *strchr(const char* s, char c);
 
 void* memcpy(void* s1, const void* s2, size_t n);
+int memcmp(const void* s1, const void* s2, size_t n);
 
 #ifdef __cplusplus
 }  // extern "C"

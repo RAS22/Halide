@@ -258,6 +258,14 @@ bool Target::merge_string(const std::string &target) {
             features |= Target::ARMv7s;
         } else if (tok == "cuda" || tok == "ptx") {
             features |= Target::CUDA;
+        } else if (tok == "cuda_capability_30") {
+            features |= Target::CUDA | Target::CUDACapability30;
+        } else if (tok == "cuda_capability_32") {
+            features |= Target::CUDA | Target::CUDACapability32;
+        } else if (tok == "cuda_capability_35") {
+            features |= Target::CUDA | Target::CUDACapability35;
+        } else if (tok == "cuda_capability_50") {
+            features |= Target::CUDA | Target::CUDACapability50;
         } else if (tok == "opencl") {
             features |= Target::OpenCL;
         } else if (tok == "gpu_debug") {
@@ -311,15 +319,16 @@ bool Target::merge_string(const std::string &target) {
 
 std::string Target::to_string() const {
   const char* const arch_names[] = {
-    "arch_unknown", "x86", "arm", "pnacl"
+      "arch_unknown", "x86", "arm", "pnacl"
   };
   const char* const os_names[] = {
-    "os_unknown", "linux", "windows", "osx", "android", "ios", "nacl"
+      "os_unknown", "linux", "windows", "osx", "android", "ios", "nacl"
   };
   const char* const feature_names[] = {
-    "jit", "sse41", "avx", "avx2", "cuda", "opencl", "opengl", "gpu_debug",
-    "no_asserts", "no_bounds_query", "armv7s", "cl_doubles",
-    "fma", "fma4", "f16c"
+      "jit", "sse41", "avx", "avx2", "cuda",
+      "opencl", "opengl", "gpu_debug", "no_asserts", "no_bounds_query",
+      "armv7s", "cl_doubles", "fma", "fma4", "f16c",
+      "cuda_capability_30", "cuda_capability_32", "cuda_capability_35", "cuda_capability_50"
   };
   string result = string(arch_names[arch])
       + "-" + Internal::int_to_string(bits)
@@ -415,6 +424,8 @@ DECLARE_CPP_INITMOD(windows_thread_pool)
 DECLARE_CPP_INITMOD(tracing)
 DECLARE_CPP_INITMOD(write_debug_image)
 DECLARE_CPP_INITMOD(posix_print)
+DECLARE_CPP_INITMOD(gpu_device_selection)
+DECLARE_CPP_INITMOD(cache)
 
 #ifdef WITH_ARM
 DECLARE_LL_INITMOD(arm)
@@ -479,16 +490,24 @@ void link_modules(std::vector<llvm::Module *> &modules) {
                        "halide_set_custom_do_task",
                        "halide_shutdown_thread_pool",
                        "halide_shutdown_trace",
+                       "halide_set_trace_file",
                        "halide_set_cuda_context",
                        "halide_set_cl_context",
                        "halide_dev_sync",
                        "halide_release",
                        "halide_current_time_ns",
                        "halide_host_cpu_count",
+                       "halide_set_num_threads",
                        "halide_opengl_get_proc_address",
                        "halide_opengl_create_context",
                        "halide_set_custom_print",
                        "halide_print",
+                       "halide_set_gpu_device",
+                       "halide_set_ocl_platform_name",
+                       "halide_set_ocl_device_type",
+                       "halide_memoization_cache_set_size",
+                       "halide_memoization_cache_lookup",
+                       "halide_memoization_cache_store",
                        "__stack_chk_guard",
                        "__stack_chk_fail",
                        ""};
@@ -527,47 +546,46 @@ void link_modules(std::vector<llvm::Module *> &modules) {
 
 namespace Internal {
 
-/** When JIT-compiling on 32-bit windows, we need to rewrite calls
-	to name-mangled win32 api calls to non-name-mangled versions. */
+/** When JIT-compiling on 32-bit windows, we need to rewrite calls 
+        to name-mangled win32 api calls to non-name-mangled versions. */
 void undo_win32_name_mangling(llvm::Module *m) {
-	llvm::IRBuilder<> builder(m->getContext());
-	// For every function prototype...
-	for (llvm::Module::iterator iter = m->begin();
-         iter != m->end(); ++iter) {
-		llvm::Function *f = (llvm::Function *)(iter);
-		string n = f->getName();
-		// if it's a __stdcall call that starts with \01_, then we're making a win32 api call
-		if (f->getCallingConv() == llvm::CallingConv::X86_StdCall &&
-			n.size() > 2 && n[0] == 1 && n[1] == '_') {
+    llvm::IRBuilder<> builder(m->getContext());
+    // For every function prototype...
+    for (llvm::Module::iterator iter = m->begin(); iter != m->end(); ++iter) {
+        llvm::Function *f = (llvm::Function *)(iter);
+        string n = f->getName();
+        // if it's a __stdcall call that starts with \01_, then we're making a win32 api call
+        if (f->getCallingConv() == llvm::CallingConv::X86_StdCall &&
+            n.size() > 2 && n[0] == 1 && n[1] == '_') {
 
-			// Unmangle the name.
-			string unmangled_name = n.substr(2);
-			size_t at = unmangled_name.rfind('@');
-			unmangled_name = unmangled_name.substr(0, at);
+            // Unmangle the name.
+            string unmangled_name = n.substr(2);
+            size_t at = unmangled_name.rfind('@');
+            unmangled_name = unmangled_name.substr(0, at);
 
-			// Extern declare the unmangled version.
-			llvm::Function *unmangled = llvm::Function::Create(f->getFunctionType(), f->getLinkage(), unmangled_name, m);
-			unmangled->setCallingConv(f->getCallingConv());
+            // Extern declare the unmangled version.
+            llvm::Function *unmangled = llvm::Function::Create(f->getFunctionType(), f->getLinkage(), unmangled_name, m);
+            unmangled->setCallingConv(f->getCallingConv());
 
-			// Add a body to the mangled version that calls the unmangled version.
-			llvm::BasicBlock *block = llvm::BasicBlock::Create(m->getContext(), "entry", f);
-			builder.SetInsertPoint(block);
+            // Add a body to the mangled version that calls the unmangled version.
+            llvm::BasicBlock *block = llvm::BasicBlock::Create(m->getContext(), "entry", f);
+            builder.SetInsertPoint(block);
 
-			vector<llvm::Value *> args;
-			for (llvm::Function::arg_iterator iter = f->arg_begin();
-				iter != f->arg_end(); ++iter) {
-				args.push_back(iter);
-			}
+            vector<llvm::Value *> args;
+            for (llvm::Function::arg_iterator iter = f->arg_begin();
+                 iter != f->arg_end(); ++iter) {
+                args.push_back(iter);
+            }
 
-			llvm::CallInst *c = builder.CreateCall(unmangled, args);
-			c->setCallingConv(f->getCallingConv());
+            llvm::CallInst *c = builder.CreateCall(unmangled, args);
+            c->setCallingConv(f->getCallingConv());
 
-			if (f->getReturnType()->isVoidTy()) {
-				builder.CreateRetVoid();
-			} else {
-				builder.CreateRet(c);
-			}
-		}
+            if (f->getReturnType()->isVoidTy()) {
+                builder.CreateRetVoid();
+            } else {
+                builder.CreateRet(c);
+            }
+        }
     }
 }
 
@@ -623,12 +641,14 @@ llvm::Module *get_initial_module_for_target(Target t, llvm::LLVMContext *c) {
     }
 
     // These modules are always used
+    modules.push_back(get_initmod_gpu_device_selection(c, bits_64));
     modules.push_back(get_initmod_posix_math(c, bits_64));
     modules.push_back(get_initmod_tracing(c, bits_64));
     modules.push_back(get_initmod_write_debug_image(c, bits_64));
     modules.push_back(get_initmod_posix_allocator(c, bits_64));
     modules.push_back(get_initmod_posix_error_handler(c, bits_64));
     modules.push_back(get_initmod_posix_print(c, bits_64));
+    modules.push_back(get_initmod_cache(c, bits_64));
 
     // These modules are optional
     if (t.arch == Target::X86) {
@@ -674,7 +694,7 @@ llvm::Module *get_initial_module_for_target(Target t, llvm::LLVMContext *c) {
             } else {
                 modules.push_back(get_initmod_opencl(c, bits_64));
             }
-	}
+        }
     } else if (t.features & Target::OpenGL) {
         if (t.features & Target::GPUDebug) {
             modules.push_back(get_initmod_opengl_debug(c, bits_64));
@@ -706,13 +726,24 @@ llvm::Module *get_initial_module_for_target(Target t, llvm::LLVMContext *c) {
 }
 
 #if WITH_PTX
-llvm::Module *get_initial_module_for_ptx_device(llvm::LLVMContext *c) {
+llvm::Module *get_initial_module_for_ptx_device(Target target, llvm::LLVMContext *c) {
     std::vector<llvm::Module *> modules;
     modules.push_back(get_initmod_ptx_dev_ll(c));
 
-    // TODO: select this based on sm_ version flag in Target when
-    // we add target specific flags.
-    llvm::Module *module = get_initmod_ptx_compute_20_ll(c);
+    llvm::Module *module;
+
+    // This table is based on the guidance at:
+    // http://docs.nvidia.com/cuda/libdevice-users-guide/basic-usage.html#linking-with-libdevice
+    if (target.features & Target::CUDACapability35) {
+        module = get_initmod_ptx_compute_35_ll(c);
+    } else if (target.features & (Target::CUDACapability32 | Target::CUDACapability50)) {
+        // For some reason sm_32 and sm_50 use libdevice 20
+        module = get_initmod_ptx_compute_20_ll(c);
+    } else if (target.features & Target::CUDACapability30) {
+        module = get_initmod_ptx_compute_30_ll(c);
+    } else {
+        module = get_initmod_ptx_compute_20_ll(c);
+    }
     modules.push_back(module);
 
     link_modules(modules);

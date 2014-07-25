@@ -1,4 +1,4 @@
-#include "mini_stdint.h"
+#include "runtime_internal.h"
 #include "../buffer_t.h"
 #include "HalideRuntime.h"
 #include "mini_cuda.h"
@@ -11,6 +11,8 @@
 static void _noop_printf(void *, const char *, ...) { }
 #define DEBUG_PRINTF _noop_printf
 #endif
+
+WEAK const char *_get_error_name(CUresult error);
 
 extern "C" {
 
@@ -135,8 +137,8 @@ WEAK bool halide_validate_dev_pointer(void *user_context, buffer_t* buf, size_t 
     CUcontext ctx;
     CUresult result = cuPointerGetAttribute(&ctx, CU_POINTER_ATTRIBUTE_CONTEXT, buf->dev);
     if (result) {
-        halide_printf(user_context, "Bad device pointer %p: cuPointerGetAttribute returned %d\n",
-                      (void *)buf->dev, result);
+        halide_printf(user_context, "Bad device pointer %p: cuPointerGetAttribute returned %s\n",
+                      (void *)buf->dev, _get_error_name(result));
         return false;
     }
     return true;
@@ -144,17 +146,18 @@ WEAK bool halide_validate_dev_pointer(void *user_context, buffer_t* buf, size_t 
 }
 
 WEAK int halide_dev_free(void *user_context, buffer_t* buf) {
+    // halide_dev_free, at present, can be exposed to clients and they
+    // should be allowed to call halide_dev_free on any buffer_t
+    // including ones that have never been used with a GPU.
+    if (buf->dev == 0) {
+        return 0;
+    }
+
     DEBUG_PRINTF( user_context, "CUDA: halide_dev_free (user_context: %p, buf: %p)\n", user_context, buf );
 
     CudaContext ctx(user_context);
     if (ctx.error != CUDA_SUCCESS)
         return ctx.error;
-
-    // halide_dev_free, at present, can be exposed to clients and they
-    // should be allowed to call halide_dev_free on any buffer_t
-    // including ones that have never been used with a GPU.
-    if (buf->dev == 0)
-        return 0;
 
     #ifdef DEBUG
     uint64_t t_before = halide_current_time_ns(user_context);
@@ -168,7 +171,8 @@ WEAK int halide_dev_free(void *user_context, buffer_t* buf) {
     // the reference.
     buf->dev = 0;
     if (err != CUDA_SUCCESS) {
-        halide_error_varargs(user_context, "CUDA: cuMemFree failed (%d)", err);
+        halide_error_varargs(user_context, "CUDA: cuMemFree failed (%s)",
+                             _get_error_name(err));
         return err;
     }
 
@@ -184,7 +188,8 @@ static CUresult create_context(void *user_context, CUcontext *ctx) {
     // Initialize CUDA
     CUresult err = cuInit(0);
     if (err != CUDA_SUCCESS) {
-        halide_error_varargs(user_context, "CUDA: cuInit failed (%d)", err);
+        halide_error_varargs(user_context, "CUDA: cuInit failed (%s)",
+                             _get_error_name(err));
         return err;
     }
 
@@ -192,7 +197,8 @@ static CUresult create_context(void *user_context, CUcontext *ctx) {
     int deviceCount = 0;
     err = cuDeviceGetCount(&deviceCount);
     if (err != CUDA_SUCCESS) {
-        halide_error_varargs(user_context, "CUDA: cuGetDeviceCount failed (%d)", err);
+        halide_error_varargs(user_context, "CUDA: cuGetDeviceCount failed (%s)",
+                             _get_error_name(err));
         return err;
     }
     if (deviceCount <= 0) {
@@ -200,23 +206,14 @@ static CUresult create_context(void *user_context, CUcontext *ctx) {
         return CUDA_ERROR_NO_DEVICE;
     }
 
-    char *device_str = getenv("HL_GPU_DEVICE");
-
-    CUdevice dev;
-    // Get device
-    CUresult status;
-    if (device_str) {
-        status = cuDeviceGet(&dev, atoi(device_str));
-    } else {
-        // Try to get a device >0 first, since 0 should be our display device
-        // For now, don't try devices > 2 to maintain compatibility with previous behavior.
-        if (deviceCount > 2)
-            deviceCount = 2;
-        for (int id = deviceCount - 1; id >= 0; id--) {
-            status = cuDeviceGet(&dev, id);
-            if (status == CUDA_SUCCESS) break;
-        }
+    int device = halide_get_gpu_device(user_context);
+    if (device == -1) {
+        device = deviceCount - 1;
     }
+
+    // Get device
+    CUdevice dev;
+    CUresult status = cuDeviceGet(&dev, device);
     if (status != CUDA_SUCCESS) {
         halide_error(user_context, "CUDA: Failed to get device\n");
         return status;
@@ -224,12 +221,95 @@ static CUresult create_context(void *user_context, CUcontext *ctx) {
 
     DEBUG_PRINTF( user_context, "    Got device %d\n", dev );
 
+    // Dump device attributes
+    #ifdef DEBUG
+    {
+        char name[256];
+        name[0] = 0;
+        err = cuDeviceGetName(name, 256, dev);
+        DEBUG_PRINTF(user_context, "      %s\n", name);
+
+        if (err != CUDA_SUCCESS) {
+            halide_error_varargs(user_context, "CUDA: cuDeviceGetName failed (%s)",
+                                 _get_error_name(err));
+            return err;
+        }
+
+        size_t memory = 0;
+        err = cuDeviceTotalMem(&memory, dev);
+        DEBUG_PRINTF(user_context, "      total memory: %d MB\n", (int)(memory >> 20));
+
+        if (err != CUDA_SUCCESS) {
+            halide_error_varargs(user_context, "CUDA: cuDeviceTotalMem failed (%s)",
+                                 _get_error_name(err));
+            return err;
+        }
+
+        // Declare variables for other state we want to query.
+        int max_threads_per_block = 0, warp_size = 0, num_cores = 0;
+        int max_block_size[] = {0, 0, 0};
+        int max_grid_size[] = {0, 0, 0};
+        int max_shared_mem = 0, max_constant_mem = 0;
+        int cc_major = 0, cc_minor = 0;
+
+        struct {int *dst; CUdevice_attribute attr;} attrs[] = {
+            {&max_threads_per_block, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK},
+            {&warp_size,             CU_DEVICE_ATTRIBUTE_WARP_SIZE},
+            {&num_cores,             CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT},
+            {&max_block_size[0],     CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X},
+            {&max_block_size[1],     CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y},
+            {&max_block_size[2],     CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z},
+            {&max_grid_size[0],      CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X},
+            {&max_grid_size[1],      CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y},
+            {&max_grid_size[2],      CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z},
+            {&max_shared_mem,        CU_DEVICE_ATTRIBUTE_SHARED_MEMORY_PER_BLOCK},
+            {&max_constant_mem,      CU_DEVICE_ATTRIBUTE_TOTAL_CONSTANT_MEMORY},
+            {&cc_major,              CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR},
+            {&cc_minor,              CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR},
+            {NULL,                   CU_DEVICE_ATTRIBUTE_MAX}};
+
+        // Do all the queries.
+        for (int i = 0; attrs[i].dst; i++) {
+            err = cuDeviceGetAttribute(attrs[i].dst, attrs[i].attr, dev);
+            if (err != CUDA_SUCCESS) {
+                halide_error_varargs(user_context,
+                                     "CUDA: cuDeviceGetAttribute failed (%s) for attribute %d",
+                                     _get_error_name(err), (int)attrs[i].attr);
+                return err;
+            }
+        }
+
+        // threads per core is a function of the compute capability
+        int threads_per_core = (cc_major == 1 ? 8 :
+                                cc_major == 2 ? (cc_minor == 0 ? 32 : 48) :
+                                cc_major == 3 ? 192 :
+                                cc_major == 5 ? 128 : 0);
+
+        DEBUG_PRINTF(user_context,
+                     "      max threads per block: %d\n"
+                     "      warp size: %d\n"
+                     "      max block size: %d %d %d\n"
+                     "      max grid size: %d %d %d\n"
+                     "      max shared memory per block: %d\n"
+                     "      max constant memory per block: %d\n"
+                     "      compute capability %d.%d\n"
+                     "      cuda cores: %d x %d = %d\n",
+                     max_threads_per_block, warp_size,
+                     max_block_size[0], max_block_size[1], max_block_size[2],
+                     max_grid_size[0], max_grid_size[1], max_grid_size[2],
+                     max_shared_mem, max_constant_mem,
+                     cc_major, cc_minor,
+                     num_cores, threads_per_core, num_cores * threads_per_core);
+    }
+    #endif
+
     // Create context
     DEBUG_PRINTF( user_context, "    cuCtxCreate %d -> ", dev );
     err = cuCtxCreate(ctx, 0, dev);
     if (err != CUDA_SUCCESS) {
-        DEBUG_PRINTF( user_context, "%d\n", err );
-        halide_error_varargs(user_context, "CUDA: cuCtxCreate failed (%d)", err);
+        DEBUG_PRINTF( user_context, "%s\n", _get_error_name(err) );
+        halide_error_varargs(user_context, "CUDA: cuCtxCreate failed (%s)",
+                             _get_error_name(err));
         return err;
     } else {
         unsigned int version = 0;
@@ -271,8 +351,9 @@ WEAK int halide_init_kernels(void *user_context, void **state_ptr, const char* p
         CUmodule module;
         CUresult err = cuModuleLoadData(&(*state)->module, ptx_src);
         if (err != CUDA_SUCCESS) {
-            DEBUG_PRINTF( user_context, "%d\n", err );
-            halide_error_varargs(user_context, "CUDA: cuModuleLoadData failed (%d)", err);
+            DEBUG_PRINTF( user_context, "%s\n", _get_error_name(err) );
+            halide_error_varargs(user_context, "CUDA: cuModuleLoadData failed (%s)",
+                                 _get_error_name(err));
             return err;
         } else {
             DEBUG_PRINTF( user_context, "%p\n", module );
@@ -365,8 +446,9 @@ WEAK int halide_dev_malloc(void *user_context, buffer_t *buf) {
     DEBUG_PRINTF( user_context, "    cuMemAlloc %lld -> ", size );
     CUresult err = cuMemAlloc(&p, size);
     if (err != CUDA_SUCCESS) {
-        DEBUG_PRINTF( user_context, "%d\n", err );
-        halide_error_varargs(user_context, "CUDA: cuMemAlloc failed (%d)", err);
+        DEBUG_PRINTF( user_context, "%s\n", _get_error_name(err));
+        halide_error_varargs(user_context, "CUDA: cuMemAlloc failed (%s)",
+                             _get_error_name(err));
         return err;
     } else {
         DEBUG_PRINTF( user_context, "%p\n", p );
@@ -421,7 +503,8 @@ WEAK int halide_copy_to_dev(void *user_context, buffer_t* buf) {
                                       src, (void *)dst, (long long)size );
                         CUresult err = cuMemcpyHtoD(dst, src, size);
                         if (err != CUDA_SUCCESS) {
-                            halide_error_varargs(user_context, "CUDA: cuMemcpyHtoD failed (%d)", err);
+                            halide_error_varargs(user_context, "CUDA: cuMemcpyHtoD failed (%s)",
+                                                 _get_error_name(err));
                             return err;
                         }
                     }
@@ -440,6 +523,10 @@ WEAK int halide_copy_to_dev(void *user_context, buffer_t* buf) {
 }
 
 WEAK int halide_copy_to_host(void *user_context, buffer_t* buf) {
+    if (!buf->dev_dirty) {
+        return 0;
+    }
+
     DEBUG_PRINTF( user_context, "CUDA: halide_copy_to_host (user_context: %p, buf: %p)\n", user_context, buf );
 
     CudaContext ctx(user_context);
@@ -447,6 +534,8 @@ WEAK int halide_copy_to_host(void *user_context, buffer_t* buf) {
         return ctx.error;
     }
 
+    // Need to check dev_dirty again, in case another thread did the
+    // copy_to_host before the serialization point above.
     if (buf->dev_dirty) {
         #ifdef DEBUG
         uint64_t t_before = halide_current_time_ns(user_context);
@@ -473,7 +562,8 @@ WEAK int halide_copy_to_host(void *user_context, buffer_t* buf) {
                                       (void *)src, dst, (long long)size );
                         CUresult err = cuMemcpyDtoH(dst, src, size);
                         if (err != CUDA_SUCCESS) {
-                            halide_error_varargs(user_context, "CUDA: cuMemcpyDtoH failed (%d)", err);
+                            halide_error_varargs(user_context, "CUDA: cuMemcpyDtoH failed (%s)",
+                                                 _get_error_name(err));
                             return err;
                         }
                     }
@@ -505,7 +595,8 @@ WEAK int halide_dev_sync(void *user_context) {
 
     CUresult err = cuCtxSynchronize();
     if (err != CUDA_SUCCESS) {
-        halide_error_varargs(user_context, "CUDA: cuCtxSynchronize failed (%d)", err);
+        halide_error_varargs(user_context, "CUDA: cuCtxSynchronize failed (%s)",
+                             _get_error_name(err));
         return err;
     }
 
@@ -547,7 +638,8 @@ WEAK int halide_dev_run(void *user_context,
     CUfunction f;
     err = cuModuleGetFunction(&f, mod, entry_name);
     if (err != CUDA_SUCCESS) {
-        halide_error_varargs(user_context, "CUDA: cuModuleGetFunction failed (%d)", err);
+        halide_error_varargs(user_context, "CUDA: cuModuleGetFunction failed (%s)",
+                             _get_error_name(err));
         return err;
     }
 
@@ -559,14 +651,16 @@ WEAK int halide_dev_run(void *user_context,
                          args,
                          NULL);
     if (err != CUDA_SUCCESS) {
-        halide_error_varargs(user_context, "CUDA: cuLaunchKernel failed (%d)", err);
+        halide_error_varargs(user_context, "CUDA: cuLaunchKernel failed (%s)",
+                             _get_error_name(err));
         return err;
     }
 
     #ifdef DEBUG
     err = cuCtxSynchronize();
     if (err != CUDA_SUCCESS) {
-        halide_error_varargs(user_context, "CUDA: cuCtxSynchronize failed (%d)\n", err);
+        halide_error_varargs(user_context, "CUDA: cuCtxSynchronize failed (%s)\n",
+                             _get_error_name(err));
         return err;
     }
     uint64_t t_after = halide_current_time_ns(user_context);
@@ -576,3 +670,35 @@ WEAK int halide_dev_run(void *user_context,
 }
 
 } // extern "C" linkage
+
+WEAK const char *_get_error_name(CUresult error) {
+    switch(error) {
+    case CUDA_SUCCESS: return "CUDA_SUCCESS";
+    case CUDA_ERROR_INVALID_VALUE: return "CUDA_ERROR_INVALID_VALUE";
+    case CUDA_ERROR_OUT_OF_MEMORY: return "CUDA_ERROR_OUT_OF_MEMORY";
+    case CUDA_ERROR_NOT_INITIALIZED: return "CUDA_ERROR_NOT_INITIALIZED";
+    case CUDA_ERROR_NO_DEVICE: return "CUDA_ERROR_NO_DEVICE";
+    case CUDA_ERROR_INVALID_DEVICE: return "CUDA_ERROR_INVALID_DEVICE";
+    case CUDA_ERROR_INVALID_IMAGE: return "CUDA_ERROR_INVALID_IMAGE";
+    case CUDA_ERROR_INVALID_CONTEXT: return "CUDA_ERROR_INVALID_CONTEXT";
+    case CUDA_ERROR_CONTEXT_ALREADY_CURRENT: return "CUDA_ERROR_CONTEXT_ALREADY_CURRENT";
+    case CUDA_ERROR_MAP_FAILED: return "CUDA_ERROR_MAP_FAILED";
+    case CUDA_ERROR_UNMAP_FAILED: return "CUDA_ERROR_UNMAP_FAILED";
+    case CUDA_ERROR_ARRAY_IS_MAPPED: return "CUDA_ERROR_ARRAY_IS_MAPPED";
+    case CUDA_ERROR_ALREADY_MAPPED: return "CUDA_ERROR_ALREADY_MAPPED";
+    case CUDA_ERROR_NO_BINARY_FOR_GPU: return "CUDA_ERROR_NO_BINARY_FOR_GPU";
+    case CUDA_ERROR_ALREADY_ACQUIRED: return "CUDA_ERROR_ALREADY_ACQUIRED";
+    case CUDA_ERROR_NOT_MAPPED: return "CUDA_ERROR_NOT_MAPPED";
+    case CUDA_ERROR_INVALID_SOURCE: return "CUDA_ERROR_INVALID_SOURCE";
+    case CUDA_ERROR_FILE_NOT_FOUND: return "CUDA_ERROR_FILE_NOT_FOUND";
+    case CUDA_ERROR_INVALID_HANDLE: return "CUDA_ERROR_INVALID_HANDLE";
+    case CUDA_ERROR_NOT_FOUND: return "CUDA_ERROR_NOT_FOUND";
+    case CUDA_ERROR_NOT_READY: return "CUDA_ERROR_NOT_READY";
+    case CUDA_ERROR_LAUNCH_FAILED: return "CUDA_ERROR_LAUNCH_FAILED";
+    case CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES: return "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES";
+    case CUDA_ERROR_LAUNCH_TIMEOUT: return "CUDA_ERROR_LAUNCH_TIMEOUT";
+    case CUDA_ERROR_LAUNCH_INCOMPATIBLE_TEXTURING: return "CUDA_ERROR_LAUNCH_INCOMPATIBLE_TEXTURING";
+    case CUDA_ERROR_UNKNOWN: return "CUDA_ERROR_UNKNOWN";
+    default: return "<Unknown error>";
+    }
+}

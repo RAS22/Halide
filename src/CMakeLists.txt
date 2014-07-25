@@ -75,6 +75,7 @@ set(RUNTIME_CPP
   nogpu
   opencl
   opengl
+  gpu_device_selection
   osx_opengl_context
   linux_opengl_context
   android_opengl_context
@@ -103,7 +104,8 @@ set(RUNTIME_CPP
   windows_cuda_debug
   windows_opencl_debug
   windows_io
-  posix_print)
+  posix_print
+  cache)
 set (RUNTIME_LL
   arm
   aarch64
@@ -140,7 +142,7 @@ foreach (i ${RUNTIME_CPP} )
     set(INITMOD "${INITMOD_PREFIX}${i}_${j}.cpp")
     add_custom_command(OUTPUT "${LL}"
                        DEPENDS "${SOURCE}"
-                       COMMAND ${CLANG} -fno-blocks -m${j} "-I${NATIVE_RUNTIME_DIR}" -DCOMPILING_HALIDE -DBITS_${j} -emit-llvm -O3 -S "${SOURCE}" -o "${LL}"
+                       COMMAND ${CLANG} -ffreestanding -fno-blocks -m${j} "-I${NATIVE_RUNTIME_DIR}" -DCOMPILING_HALIDE -DBITS_${j} -emit-llvm -O3 -S "${SOURCE}" -o "${LL}"
                        COMMENT "${SOURCE} -> ${LL}")
     add_custom_command(OUTPUT "${BC}"
                        DEPENDS "${LL}"
@@ -265,7 +267,8 @@ set(HEADER_FILES
   Random.h
   ParallelRVar.h
   BoundaryConditions.h
-  UnifyDuplicateLets.h)
+  UnifyDuplicateLets.h
+  Memoization.h)
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/include")
 file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/include/" NATIVE_INCLUDE_PATH)
@@ -357,6 +360,7 @@ add_library(Halide ${HALIDE_LIBRARY_TYPE}
   FuseGPUThreadLoops.cpp
   ParallelRVar.cpp
   BoundaryConditions.cpp
+  Memoization.cpp
   "${CMAKE_BINARY_DIR}/include/Halide.h"
   ${HEADER_FILES})
 

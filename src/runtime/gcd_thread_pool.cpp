@@ -1,6 +1,4 @@
-#include "mini_stdint.h"
-
-#define WEAK __attribute__((weak))
+#include "runtime_internal.h"
 
 extern "C" {
 
@@ -14,6 +12,9 @@ extern void dispatch_apply_f(size_t iterations, dispatch_queue_t queue,
                              void *context, void (*work)(void *, size_t));
 
 WEAK void halide_shutdown_thread_pool() {
+}
+
+WEAK void halide_set_num_threads(int) {
 }
 
 WEAK int (*halide_custom_do_task)(void *user_context, int (*)(void *, int, uint8_t *),

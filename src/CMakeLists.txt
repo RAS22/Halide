@@ -105,7 +105,8 @@ set(RUNTIME_CPP
   windows_opencl_debug
   windows_io
   posix_print
-  cache)
+  cache
+  nacl_host_cpu_count)
 set (RUNTIME_LL
   arm
   aarch64
@@ -268,6 +269,8 @@ set(HEADER_FILES
   ParallelRVar.h
   BoundaryConditions.h
   UnifyDuplicateLets.h
+  HumanReadableStmt.h
+  StmtToHtml.h
   Memoization.h)
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/include")
@@ -360,6 +363,8 @@ add_library(Halide ${HALIDE_LIBRARY_TYPE}
   FuseGPUThreadLoops.cpp
   ParallelRVar.cpp
   BoundaryConditions.cpp
+  HumanReadableStmt.cpp
+  StmtToHtml.cpp
   Memoization.cpp
   "${CMAKE_BINARY_DIR}/include/Halide.h"
   ${HEADER_FILES})

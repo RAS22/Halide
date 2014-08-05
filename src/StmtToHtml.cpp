@@ -294,6 +294,12 @@ public:
         print_list(symbol(op->name) + "(", op->args, ")");
         stream << close_span();
     }
+    void visit(const UnionCall *op) {
+        stream << open_span("Call");
+        print_list(symbol(op->name) + "(", op->args, ")");
+        stream << "union calls not supported for HTML";
+        stream << close_span();
+    }
 
     void visit(const Let *op) {
         stream << open_span("Let");

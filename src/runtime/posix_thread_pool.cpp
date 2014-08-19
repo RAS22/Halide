@@ -1,5 +1,16 @@
 #include "runtime_internal.h"
 
+#include "HalideRuntime.h"
+
+// TODO: This code currently doesn't work on OS X (Darwin) as we do
+// not initialize the pthread_mutex_t using PTHREAD_MUTEX_INITIALIZER
+// or pthread_mutex_init. (And Darwin using a non-zero value for the
+// siganture here.) Fix is probably to use a pthread_once type
+// mechanism to call pthread_mutex_init, but that requires the once
+// initializer which might not be zero and is platform dependent. Thus
+// we need our own portable once implementation. For now, threadpool
+// only works on platforms where PTHREAD_MUTEX_INITIALIZER is zero.
+
 extern "C" {
 
 extern long sysconf(int);
@@ -19,8 +30,8 @@ typedef struct {
 } pthread_cond_t;
 typedef long pthread_condattr_t;
 typedef struct {
-    // 40 bytes is enough for a mutex on 64-bit and 32-bit systems
-    unsigned char _private[40];
+    // 64 bytes is enough for a mutex on 64-bit and 32-bit systems
+    unsigned char _private[64];
 } pthread_mutex_t;
 typedef long pthread_mutexattr_t;
 extern int pthread_create(pthread_t *thread, pthread_attr_t const * attr,
@@ -40,9 +51,16 @@ extern int atoi(const char *);
 
 extern int halide_printf(void *user_context, const char *, ...);
 
-#ifndef NULL
-#define NULL 0
-#endif
+} // extern "C"
+
+namespace Halide { namespace Runtime { namespace Internal {
+
+typedef int (*halide_task)(void *user_context, int, uint8_t *);
+
+WEAK int (*halide_custom_do_task)(void *user_context, halide_task, int, uint8_t *);
+WEAK int (*halide_custom_do_par_for)(void *, halide_task, int, int, uint8_t *);
+WEAK int halide_num_threads;
+WEAK bool halide_thread_pool_initialized = false;
 
 struct work {
     work *next_job;
@@ -57,7 +75,7 @@ struct work {
 
 // The work queue and thread pool is weak, so one big work queue is shared by all halide functions
 #define MAX_THREADS 64
-WEAK struct {
+struct halide_work_queue_t {
     // all fields are protected by this mutex.
     pthread_mutex_t mutex;
 
@@ -76,10 +94,29 @@ WEAK struct {
         return !shutdown;
     }
 
-} halide_work_queue;
+};
+WEAK halide_work_queue_t halide_work_queue;
 
-WEAK int halide_num_threads;
-WEAK bool halide_thread_pool_initialized = false;
+}}} // namespace Halide::Runtime::Internal
+
+extern "C" {
+
+WEAK void halide_mutex_cleanup(halide_mutex *mutex_arg) {
+    pthread_mutex_t *mutex = (pthread_mutex_t *)mutex_arg;
+    pthread_mutex_destroy(mutex);
+    memset(mutex_arg, 0, sizeof(halide_mutex));
+}
+
+WEAK void halide_mutex_lock(halide_mutex *mutex_arg) {
+    pthread_mutex_t *mutex = (pthread_mutex_t *)mutex_arg;
+    pthread_mutex_lock(mutex);
+}
+
+WEAK void halide_mutex_unlock(halide_mutex *mutex_arg) {
+    pthread_mutex_t *mutex = (pthread_mutex_t *)mutex_arg;
+    pthread_mutex_unlock(mutex);
+}
+
 
 WEAK void halide_shutdown_thread_pool() {
     if (!halide_thread_pool_initialized) return;
@@ -120,15 +157,10 @@ WEAK void halide_set_num_threads(int n) {
     halide_num_threads = n;
 }
 
-typedef int (*halide_task)(void *user_context, int, uint8_t *);
-
-WEAK int (*halide_custom_do_task)(void *user_context, halide_task, int, uint8_t *);
-
 WEAK void halide_set_custom_do_task(int (*f)(void *, halide_task, int, uint8_t *)) {
     halide_custom_do_task = f;
 }
 
-WEAK int (*halide_custom_do_par_for)(void *, halide_task, int, int, uint8_t *);
 
 WEAK void halide_set_custom_do_par_for(int (*f)(void *, halide_task, int, int, uint8_t *)) {
     halide_custom_do_par_for = f;
@@ -143,6 +175,9 @@ WEAK int halide_do_task(void *user_context, halide_task f, int idx,
     }
 }
 
+} // extern "C"
+
+namespace Halide { namespace Runtime { namespace Internal {
 WEAK void *halide_worker_thread(void *void_arg) {
     work *owned_job = (work *)void_arg;
 
@@ -204,7 +239,9 @@ WEAK void *halide_worker_thread(void *void_arg) {
     pthread_mutex_unlock(&halide_work_queue.mutex);
     return NULL;
 }
+}}} // namespace Halide::Runtime::Internal
 
+extern "C" {
 extern int halide_host_cpu_count();
 
 WEAK int halide_do_par_for(void *user_context, int (*f)(void *, int, uint8_t *),
@@ -276,4 +313,4 @@ WEAK int halide_do_par_for(void *user_context, int (*f)(void *, int, uint8_t *),
     return job.exit_status;
 }
 
-}
+} // extern "C"

@@ -1,24 +1,21 @@
 #include "runtime_internal.h"
-#include "mini_string.h"
-#include "scoped_spin_lock.h"
 #include "../buffer_t.h"
 #include "HalideRuntime.h"
-
-#include <stdarg.h>
+#include "scoped_mutex_lock.h"
 
 // This is temporary code. In particular, the hash table is stupid and
-// currently thredsafety is accomplished via large granularity spin
+// currently thread safety is accomplished via large granularity spin
 // locks. It is mainly intended to prove the programming model and
 // runtime interface for memoization. We'll improve the implementation
 // later. In the meantime, on some platforms it can be replaced by a
 // platform specific LRU cache such as libcache from Apple.
 
-namespace {
+namespace Halide { namespace Runtime { namespace Internal {
 
 #define CACHE_DEBUGGING 0
 
 #if CACHE_DEBUGGING
-void debug_print_buffer(void *user_context, const char *buf_name, const buffer_t &buf) {
+WEAK void debug_print_buffer(void *user_context, const char *buf_name, const buffer_t &buf) {
     halide_printf(user_context, "%s: elem_size %d, (%d, %d, %d) (%d, %d, %d) (%d, %d, %d) (%d, %d, %d)\n",
                   buf_name, buf.elem_size,
                   buf.min[0], buf.extent[0], buf.stride[0],
@@ -27,20 +24,41 @@ void debug_print_buffer(void *user_context, const char *buf_name, const buffer_t
                   buf.min[3], buf.extent[3], buf.stride[3]);
 }
 
-void debug_print_key(void *user_context, const char *msg, const uint8_t *cache_key, int32_t key_size) {
+WEAK char to_hex_char(int val) {
+    if (val < 10) {
+        return '0' + val;
+    }
+    return 'A' + (val - 10);
+}
+
+WEAK void debug_print_key(void *user_context, const char *msg, const uint8_t *cache_key, int32_t key_size) {
     halide_printf(user_context, "Key for %s\n", msg);
+    char buf[1024];
+    bool append_ellipses = false;
+    if (key_size > (sizeof(buf) / 2) - 1) { // Each byte in key can take two bytes in output
+        append_ellipses = true;
+        key_size = (sizeof(buf) / 2) - 4; // room for NUL and "..."
+    }
+    char *buf_ptr = buf;
     for (int i = 0; i < key_size; i++) {
         if (cache_key[i] >= 32 && cache_key[i] <= '~') {
-            halide_printf(user_context, "%c", cache_key[i]);
+            *buf_ptr++ = cache_key[i];
         } else {
-            halide_printf(user_context, "%x%x", (cache_key[i] >> 4), cache_key[i] & 0xf);
+            *buf_ptr++ = to_hex_char((cache_key[i] >> 4));
+            *buf_ptr++ = to_hex_char((cache_key[i] & 0xf));
         }
     }
-    halide_printf(user_context, "\n");
+    if (append_ellipses) {
+        *buf_ptr++ = '.';
+        *buf_ptr++ = '.';
+        *buf_ptr++ = '.';
+    }
+    *buf_ptr++ = '\0';
+    halide_printf(user_context, "%s\n", buf);
 }
 #endif
 
-size_t full_extent(const buffer_t &buf) {
+WEAK size_t full_extent(const buffer_t &buf) {
     size_t result = 1;
     for (int i = 0; i < 4; i++) {
         int32_t stride = buf.stride[i];
@@ -52,7 +70,7 @@ size_t full_extent(const buffer_t &buf) {
     return result;
 }
 
-void copy_from_to(void *user_context, const buffer_t &from, buffer_t &to) {
+WEAK void copy_from_to(void *user_context, const buffer_t &from, buffer_t &to) {
     size_t buffer_size = full_extent(from);;
     halide_assert(user_context, from.elem_size == to.elem_size);
     for (int i = 0; i < 4; i++) {
@@ -62,7 +80,7 @@ void copy_from_to(void *user_context, const buffer_t &from, buffer_t &to) {
     memcpy(to.host, from.host, buffer_size * from.elem_size);
 }
 
-buffer_t copy_of_buffer(void *user_context, const buffer_t &buf) {
+WEAK buffer_t copy_of_buffer(void *user_context, const buffer_t &buf) {
     buffer_t result = buf;
     size_t buffer_size = full_extent(result);
     // TODO: ERROR RETURN
@@ -71,12 +89,12 @@ buffer_t copy_of_buffer(void *user_context, const buffer_t &buf) {
     return result;
 }
 
-bool keys_equal(const uint8_t *key1, const uint8_t *key2, size_t key_size) {
+WEAK bool keys_equal(const uint8_t *key1, const uint8_t *key2, size_t key_size) {
     size_t i = 0;
     return memcmp(key1, key2, key_size) == 0;
 }
 
-bool bounds_equal(const buffer_t &buf1, const buffer_t &buf2) {
+WEAK bool bounds_equal(const buffer_t &buf1, const buffer_t &buf2) {
     if (buf1.elem_size != buf2.elem_size)
         return false;
     for (size_t i = 0; i < 4; i++) {
@@ -141,7 +159,7 @@ struct CacheEntry {
         halide_free(user_context, key);
         for (int32_t i = 0; i < tuple_count; i++) {
           halide_dev_free(user_context, &buffer(i));
-          halide_free(user_context, &buffer(i).host);
+          halide_free(user_context, buffer(i).host);
         }
     }
 
@@ -154,7 +172,7 @@ private:
     CacheEntry(const CacheEntry &) { }
 };
 
-uint32_t djb_hash(const uint8_t *key, size_t key_size)  {
+WEAK uint32_t djb_hash(const uint8_t *key, size_t key_size)  {
     uint32_t h = 5381;
     for (size_t i = 0; i < key_size; i++) {
       h = (h << 5) + h + key[i];
@@ -162,63 +180,64 @@ uint32_t djb_hash(const uint8_t *key, size_t key_size)  {
     return h;
 }
 
-volatile int memoization_lock = 0;
+WEAK halide_mutex memoization_lock;
 
 const size_t kHashTableSize = 256;
 
-CacheEntry *cache_entries[kHashTableSize];
+WEAK CacheEntry *cache_entries[kHashTableSize];
 
-CacheEntry *most_recently_used = NULL;
-CacheEntry *least_recently_used = NULL;
+WEAK CacheEntry *most_recently_used = NULL;
+WEAK CacheEntry *least_recently_used = NULL;
 
 const uint64_t kDefaultCacheSize = 1 << 20;
-int64_t max_cache_size = kDefaultCacheSize;
-int64_t current_cache_size = 0;
+WEAK int64_t max_cache_size = kDefaultCacheSize;
+WEAK int64_t current_cache_size = 0;
 
 #if CACHE_DEBUGGING
-void validate_cache() {
-  halide_printf(NULL, "validating cache\n");
-  int entries_in_hash_table = 0;
-  for (int i = 0; i < kHashTableSize; i++) {
-    CacheEntry *entry = cache_entries[i];
-    while (entry != NULL) {
-      entries_in_hash_table++;
-      if (entry->more_recent == NULL && entry != most_recently_used) {
-        halide_printf(NULL, "cache invalid 1\n");
-        __builtin_trap();
-      }
-      if (entry->less_recent == NULL && entry != least_recently_used) {
-        halide_printf(NULL, "cache invalid 2\n");
-        __builtin_trap();
-      }
-      entry = entry->next;
+WEAK void validate_cache() {
+    halide_printf(NULL, "validating cache, current size %lld of maximum %lld\n",
+                  current_cache_size, max_cache_size);
+    int entries_in_hash_table = 0;
+    for (int i = 0; i < kHashTableSize; i++) {
+        CacheEntry *entry = cache_entries[i];
+        while (entry != NULL) {
+            entries_in_hash_table++;
+            if (entry->more_recent == NULL && entry != most_recently_used) {
+                halide_printf(NULL, "cache invalid case 1\n");
+                __builtin_trap();
+            }
+            if (entry->less_recent == NULL && entry != least_recently_used) {
+                halide_printf(NULL, "cache invalid case 2\n");
+                __builtin_trap();
+            }
+            entry = entry->next;
+        }
     }
-  }
-  int entries_from_mru = 0;
-  CacheEntry *mru_chain = most_recently_used;
-  while (mru_chain != NULL) {
-    entries_from_mru++;
-    mru_chain = mru_chain->less_recent;
-  }
-  int entries_from_lru = 0;
-  CacheEntry *lru_chain = least_recently_used;
-  while (lru_chain != NULL) {
-    entries_from_lru++;
-    lru_chain = lru_chain->more_recent;
-  }
-  halide_printf(NULL, "hash entries %d, mru entries %d, lru entries %d\n", entries_in_hash_table, entries_from_mru, entries_from_lru);
-  if (entries_in_hash_table != entries_from_mru) {
-    halide_printf(NULL, "cache invalid 3\n");
-    __builtin_trap();
-  }
-  if (entries_in_hash_table != entries_from_lru) {
-    halide_printf(NULL, "cache invalid 4\n");
-    __builtin_trap();
-  }
+    int entries_from_mru = 0;
+    CacheEntry *mru_chain = most_recently_used;
+    while (mru_chain != NULL) {
+        entries_from_mru++;
+        mru_chain = mru_chain->less_recent;
+    }
+    int entries_from_lru = 0;
+    CacheEntry *lru_chain = least_recently_used;
+    while (lru_chain != NULL) {
+        entries_from_lru++;
+        lru_chain = lru_chain->more_recent;
+    }
+    halide_printf(NULL, "hash entries %d, mru entries %d, lru entries %d\n", entries_in_hash_table, entries_from_mru, entries_from_lru);
+    if (entries_in_hash_table != entries_from_mru) {
+        halide_printf(NULL, "cache invalid case 3\n");
+        __builtin_trap();
+    }
+    if (entries_in_hash_table != entries_from_lru) {
+        halide_printf(NULL, "cache invalid case 4\n");
+        __builtin_trap();
+    }
 }
 #endif
 
-void prune_cache() {
+WEAK void prune_cache() {
 #if CACHE_DEBUGGING
     validate_cache();
 #endif
@@ -258,7 +277,7 @@ void prune_cache() {
 #endif
 }
 
-} // End anonymous namespace
+}}} // namespace Halide::Runtime::Internal
 
 extern "C" {
 
@@ -268,7 +287,7 @@ WEAK void halide_memoization_cache_set_size(int64_t size) {
         size = kDefaultCacheSize;
     }
 
-    ScopedSpinLock lock(&memoization_lock);
+    ScopedMutexLock lock(&memoization_lock);
 
     max_cache_size = size;
     prune_cache();
@@ -276,6 +295,11 @@ WEAK void halide_memoization_cache_set_size(int64_t size) {
 
 WEAK bool halide_memoization_cache_lookup(void *user_context, const uint8_t *cache_key, int32_t size,
                                           buffer_t *computed_bounds, int32_t tuple_count, ...) {
+    uint32_t h = djb_hash(cache_key, size);
+    uint32_t index = h % kHashTableSize;
+
+    ScopedMutexLock lock(&memoization_lock);
+
 #if CACHE_DEBUGGING
     debug_print_key(user_context, "halide_memoization_cache_lookup", cache_key, size);
 
@@ -292,11 +316,6 @@ WEAK bool halide_memoization_cache_lookup(void *user_context, const uint8_t *cac
     }
     validate_cache();
 #endif
-
-    uint32_t h = djb_hash(cache_key, size);
-    uint32_t index = h % kHashTableSize;
-
-    ScopedSpinLock lock(&memoization_lock);
 
     CacheEntry *entry = cache_entries[index];
     while (entry != NULL) {
@@ -360,6 +379,11 @@ WEAK bool halide_memoization_cache_lookup(void *user_context, const uint8_t *cac
 
 WEAK void halide_memoization_cache_store(void *user_context, const uint8_t *cache_key, int32_t size,
                                          buffer_t *computed_bounds, int32_t tuple_count, ...) {
+    uint32_t h = djb_hash(cache_key, size);
+    uint32_t index = h % kHashTableSize;
+
+    ScopedMutexLock lock(&memoization_lock);
+
 #if CACHE_DEBUGGING
     debug_print_key(user_context, "halide_memoization_cache_store", cache_key, size);
 
@@ -376,11 +400,6 @@ WEAK void halide_memoization_cache_store(void *user_context, const uint8_t *cach
     }
     validate_cache();
 #endif
-
-    uint32_t h = djb_hash(cache_key, size);
-    uint32_t index = h % kHashTableSize;
-
-    ScopedSpinLock lock(&memoization_lock);
 
     CacheEntry *entry = cache_entries[index];
     while (entry != NULL) {
@@ -420,7 +439,6 @@ WEAK void halide_memoization_cache_store(void *user_context, const uint8_t *cach
     current_cache_size += added_size;
     prune_cache();
 
-    // BUGGY: racey writes?
     void *entry_storage = halide_malloc(user_context, sizeof(CacheEntry) + sizeof(buffer_t) * (tuple_count - 1));
     va_list tuple_buffers;
     va_start(tuple_buffers, tuple_count);
@@ -446,9 +464,21 @@ WEAK void halide_memoization_cache_store(void *user_context, const uint8_t *cach
 #if 0
 WEAK void halide_memoization_cache_release(void *user_context, const uint8_t *cache_key, int32_t size, buffer_t *computed_bounds, int32_t tuple_count, ...) {
 }
-
-}
-
 #endif
+
+WEAK void halide_memoization_cache_cleanup() {
+    for (int i = 0; i < kHashTableSize; i++) {
+        CacheEntry *entry = cache_entries[i];
+        cache_entries[i] = NULL;
+        while (entry != NULL) {
+            CacheEntry *next = entry->next;
+            entry->~CacheEntry();
+            halide_free(NULL, entry);
+            entry = next;
+        }
+    }
+    current_cache_size = 0;
+    halide_mutex_cleanup(&memoization_lock);
+}
 
 }

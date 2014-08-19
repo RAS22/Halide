@@ -37,6 +37,7 @@ public:
         }
 
         shutdown_thread_pool();
+        execution_engine->runStaticConstructorsDestructors(true);
         delete execution_engine;
         delete context;
         // No need to delete the module - deleting the execution engine should take care of that.
@@ -131,7 +132,11 @@ void JITCompiledModule::compile_module(CodeGen *cg, llvm::Module *m, const strin
     options.PositionIndependentExecutable = true;
     options.UseInitArray = false;
 
+    #if LLVM_VERSION > 35
+    EngineBuilder engine_builder((std::unique_ptr<llvm::Module>(m)));
+    #else
     EngineBuilder engine_builder(m);
+    #endif
     engine_builder.setTargetOptions(options);
     engine_builder.setErrorStr(&error_string);
     engine_builder.setEngineKind(EngineKind::JIT);
@@ -203,7 +208,7 @@ void JITCompiledModule::compile_module(CodeGen *cg, llvm::Module *m, const strin
     #endif
 
     // TODO: I don't think this is necessary, we shouldn't have any static constructors
-    // ee->runStaticConstructorsDestructors(false);
+    ee->runStaticConstructorsDestructors(false);
 
 }
 

@@ -501,6 +501,7 @@ void link_modules(std::vector<llvm::Module *> &modules) {
                        "halide_set_num_threads",
                        "halide_opengl_get_proc_address",
                        "halide_opengl_create_context",
+                       "halide_opengl_output_client_bound",
                        "halide_set_custom_print",
                        "halide_print",
                        "halide_set_gpu_device",
@@ -509,6 +510,7 @@ void link_modules(std::vector<llvm::Module *> &modules) {
                        "halide_memoization_cache_set_size",
                        "halide_memoization_cache_lookup",
                        "halide_memoization_cache_store",
+                       "halide_memoization_cache_cleanup",
                        "__stack_chk_guard",
                        "__stack_chk_fail",
                        ""};
@@ -558,6 +560,7 @@ void undo_win32_name_mangling(llvm::Module *m) {
         string n = f->getName();
         // if it's a __stdcall call that starts with \01_, then we're making a win32 api call
         if (f->getCallingConv() == llvm::CallingConv::X86_StdCall &&
+            f->empty() &&
             n.size() > 2 && n[0] == 1 && n[1] == '_') {
 
             // Unmangle the name.

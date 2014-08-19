@@ -488,8 +488,8 @@ void Function::clear_all_definitions() {
     CountSelfReferencesBeforeRemoval counter;
     counter.func = this;
 
-    for (size_t j = 0; j < contents.ptr->reductions.size(); j++) {
-        ReductionDefinition r = contents.ptr->reductions[j];
+    for (size_t j = 0; j < contents.ptr->updates.size(); j++) {
+        UpdateDefinition r = contents.ptr->updates[j];
         vector<Expr> args = r.args;
         vector<Expr> values = r.values;
 
@@ -506,7 +506,7 @@ void Function::clear_all_definitions() {
                 << "Removed too many circular references when defining reduction.\n";
         }
     }
-    contents.ptr->reductions.clear();
+    contents.ptr->updates.clear();
 
     // clear other alternative defintions
     contents.ptr->output_buffers.clear();

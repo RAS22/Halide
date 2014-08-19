@@ -677,7 +677,7 @@ void UnionReduction::convert_to_func() {
                     Call::make(func, reduction_vargs2, j));
         }
 
-        func.define_reduction(reduction_args, reduction_val);
+        func.define_update(reduction_args, reduction_val);
     }
     _contents.ptr->funcs.push_back(func);
 }

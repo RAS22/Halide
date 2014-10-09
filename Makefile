@@ -17,7 +17,7 @@ LLVM_BINDIR = $(shell $(LLVM_CONFIG) --bindir)
 LLVM_LIBDIR = $(shell $(LLVM_CONFIG) --libdir)
 LLVM_AS = $(LLVM_BINDIR)/llvm-as
 LLVM_NM = $(LLVM_BINDIR)/llvm-nm
-LLVM_CXX_FLAGS = $(filter-out -O% -g -fomit-frame-pointer, $(shell $(LLVM_CONFIG) --cxxflags))
+LLVM_CXX_FLAGS = $(filter-out -O% -g -fomit-frame-pointer -Wcovered-switch-default, $(shell $(LLVM_CONFIG) --cxxflags))
 OPTIMIZE ?= -O3
 # This can be set to -m32 to get a 32-bit build of Halide on a 64-bit system.
 # (Normally this can be done via pointing to a compiler that defaults to 32-bits,
@@ -28,15 +28,20 @@ BUILD_BIT_SIZE ?=
 LLVM_VERSION_TIMES_10 = $(shell $(LLVM_CONFIG) --version | cut -b 1,3)
 LLVM_CXX_FLAGS += -DLLVM_VERSION=$(LLVM_VERSION_TIMES_10)
 
+# All WITH_* flags are either empty or not-empty. They do not behave
+# like true/false values in most languages.  To turn one off, either
+# edit this file, add "WITH_FOO=" (no assigned value) to the make
+# line, or define an environment variable WITH_FOO that has an empty
+# value.
 WITH_NATIVE_CLIENT ?= $(findstring nacltransforms, $(LLVM_COMPONENTS))
 WITH_X86 ?= $(findstring x86, $(LLVM_COMPONENTS))
 WITH_ARM ?= $(findstring arm, $(LLVM_COMPONENTS))
 WITH_MIPS ?= $(findstring mips, $(LLVM_COMPONENTS))
 WITH_AARCH64 ?= $(findstring aarch64, $(LLVM_COMPONENTS))
-WITH_OPENCL ?= 1
-WITH_OPENGL ?= 1
-WITH_INTROSPECTION ?= 1
-# WITH_EXCEPTIONS ?= 1
+WITH_OPENCL ?= not-empty
+WITH_OPENGL ?= not-empty
+WITH_INTROSPECTION ?= not-empty
+WITH_EXCEPTIONS ?=
 
 # turn off PTX for llvm 3.2
 ifneq ($(LLVM_VERSION), 3.2)
@@ -75,7 +80,8 @@ AARCH64_LLVM_CONFIG_LIB=$(if $(WITH_AARCH64), aarch64, )
 INTROSPECTION_CXX_FLAGS=$(if $(WITH_INTROSPECTION), -DWITH_INTROSPECTION, )
 EXCEPTIONS_CXX_FLAGS=$(if $(WITH_EXCEPTIONS), -DWITH_EXCEPTIONS, )
 
-CXX_FLAGS = -Wall -Werror -fno-rtti -Woverloaded-virtual -Wno-unused-function -Wcast-qual -fPIC $(OPTIMIZE) -fno-omit-frame-pointer -DCOMPILING_HALIDE $(BUILD_BIT_SIZE)
+CXX_WARNING_FLAGS = -Wall -Werror -Wno-unused-function -Wcast-qual
+CXX_FLAGS = $(CXX_WARNING_FLAGS) -fno-rtti -Woverloaded-virtual -fPIC $(OPTIMIZE) -fno-omit-frame-pointer -DCOMPILING_HALIDE $(BUILD_BIT_SIZE)
 CXX_FLAGS += $(LLVM_CXX_FLAGS)
 CXX_FLAGS += $(NATIVE_CLIENT_CXX_FLAGS)
 CXX_FLAGS += $(PTX_CXX_FLAGS)
@@ -87,7 +93,16 @@ CXX_FLAGS += $(OPENGL_CXX_FLAGS)
 CXX_FLAGS += $(MIPS_CXX_FLAGS)
 CXX_FLAGS += $(INTROSPECTION_CXX_FLAGS)
 CXX_FLAGS += $(EXCEPTIONS_CXX_FLAGS)
-LLVM_LIBS = -L $(LLVM_LIBDIR) $(shell $(LLVM_CONFIG) --libs bitwriter bitreader linker ipo mcjit jit $(X86_LLVM_CONFIG_LIB) $(ARM_LLVM_CONFIG_LIB) $(OPENCL_LLVM_CONFIG_LIB) $(NATIVE_CLIENT_LLVM_CONFIG_LIB) $(PTX_LLVM_CONFIG_LIB) $(AARCH64_LLVM_CONFIG_LIB) $(MIPS_LLVM_CONFIG_LIB))
+
+LLVM_35_OR_OLDER = $(findstring $(LLVM_VERSION_TIMES_10), 32 33 34 35)
+ifneq ($(LLVM_35_OR_OLDER), )
+LLVM_OLD_JIT_COMPONENT = jit
+endif
+
+print-%:
+	@echo '$*=$($*)'
+
+LLVM_LIBS = -L $(LLVM_LIBDIR) $(shell $(LLVM_CONFIG) --libs bitwriter bitreader linker ipo mcjit $(LLVM_OLD_JIT_COMPONENT) $(X86_LLVM_CONFIG_LIB) $(ARM_LLVM_CONFIG_LIB) $(OPENCL_LLVM_CONFIG_LIB) $(NATIVE_CLIENT_LLVM_CONFIG_LIB) $(PTX_LLVM_CONFIG_LIB) $(AARCH64_LLVM_CONFIG_LIB) $(MIPS_LLVM_CONFIG_LIB))
 
 LLVM_LDFLAGS = $(shell $(LLVM_CONFIG) --ldflags)
 
@@ -105,6 +120,12 @@ endif
 
 # Remove some non-llvm libs that llvm-config has helpfully included
 LIBS = $(filter-out -lrt -lz -lpthread -ldl , $(LLVM_LIBS))
+
+# On linux, statically link libgcc and libstdc++ to avoid version woes
+SHARED_LD_FLAGS ?=
+ifeq ($(UNAME), Linux)
+SHARED_LD_FLAGS += -static-libstdc++ -static-libgcc
+endif
 
 ifneq ($(WITH_PTX), )
 ifneq (,$(findstring ptx,$(HL_TARGET)))
@@ -152,6 +173,11 @@ ifneq ($(TEST_PTX), )
 TEST_CXX_FLAGS += -DTEST_PTX
 endif
 
+# Note that we don't include -g in the static test flags. OS X's
+# dsymutil can't seem to generate a dSYM folder from the binaries that
+# trunk llvm produces.
+STATIC_TEST_CXX_FLAGS ?= $(BUILD_BIT_SIZE) -fno-omit-frame-pointer
+
 # Compiling the tutorials requires libpng
 LIBPNG_LIBS_DEFAULT = $(shell libpng-config --ldflags)
 LIBPNG_CXX_FLAGS ?= $(shell libpng-config --cflags)
@@ -182,10 +208,10 @@ SOURCES = $(SOURCE_FILES:%.cpp=src/%.cpp)
 OBJECTS = $(SOURCE_FILES:%.cpp=$(BUILD_DIR)/%.o)
 HEADERS = $(HEADER_FILES:%.h=src/%.h)
 
-RUNTIME_CPP_COMPONENTS = android_io cuda fake_thread_pool gcd_thread_pool ios_io android_clock linux_clock nogpu opencl posix_allocator posix_clock osx_clock windows_clock posix_error_handler posix_io nacl_io osx_io posix_math posix_thread_pool android_host_cpu_count linux_host_cpu_count osx_host_cpu_count tracing write_debug_image cuda_debug opencl_debug windows_cuda windows_cuda_debug windows_opencl windows_opencl_debug windows_io windows_thread_pool ssp opengl opengl_debug linux_opengl_context osx_opengl_context android_opengl_context posix_print gpu_device_selection cache nacl_host_cpu_count
+RUNTIME_CPP_COMPONENTS = android_io cuda fake_thread_pool gcd_thread_pool ios_io android_clock linux_clock nogpu opencl posix_allocator posix_clock osx_clock windows_clock posix_error_handler posix_io posix_math posix_thread_pool android_host_cpu_count linux_host_cpu_count osx_host_cpu_count tracing write_debug_image windows_cuda windows_opencl windows_io windows_thread_pool ssp opengl linux_opengl_context osx_opengl_context android_opengl_context posix_print gpu_device_selection cache nacl_host_cpu_count to_string
 RUNTIME_LL_COMPONENTS = arm posix_math ptx_dev x86_avx x86 x86_sse41 pnacl_math win32_math aarch64 mips
 
-INITIAL_MODULES = $(RUNTIME_CPP_COMPONENTS:%=$(BUILD_DIR)/initmod.%_32.o) $(RUNTIME_CPP_COMPONENTS:%=$(BUILD_DIR)/initmod.%_64.o) $(RUNTIME_LL_COMPONENTS:%=$(BUILD_DIR)/initmod.%_ll.o) $(PTX_DEVICE_INITIAL_MODULES:libdevice.%.bc=$(BUILD_DIR)/initmod_ptx.%_ll.o)
+INITIAL_MODULES = $(RUNTIME_CPP_COMPONENTS:%=$(BUILD_DIR)/initmod.%_32.o) $(RUNTIME_CPP_COMPONENTS:%=$(BUILD_DIR)/initmod.%_64.o) $(RUNTIME_CPP_COMPONENTS:%=$(BUILD_DIR)/initmod.%_32_debug.o) $(RUNTIME_CPP_COMPONENTS:%=$(BUILD_DIR)/initmod.%_64_debug.o) $(RUNTIME_LL_COMPONENTS:%=$(BUILD_DIR)/initmod.%_ll.o) $(PTX_DEVICE_INITIAL_MODULES:libdevice.%.bc=$(BUILD_DIR)/initmod_ptx.%_ll.o)
 
 .PHONY: all
 all: $(BIN_DIR)/libHalide.a $(BIN_DIR)/libHalide.so include/Halide.h include/HalideRuntime.h test_internal
@@ -198,7 +224,7 @@ $(BIN_DIR)/libHalide.a: $(OBJECTS) $(INITIAL_MODULES)
 	ranlib $(BIN_DIR)/libHalide.a
 
 $(BIN_DIR)/libHalide.so: $(BIN_DIR)/libHalide.a
-	$(CXX) $(BUILD_BIT_SIZE) -shared $(OBJECTS) $(INITIAL_MODULES) $(LIBS) $(LLVM_LDFLAGS) -ldl -lz -lpthread -o $(BIN_DIR)/libHalide.so
+	$(CXX) $(BUILD_BIT_SIZE) -shared $(OBJECTS) $(INITIAL_MODULES) $(LIBS) $(LLVM_LDFLAGS) $(SHARED_LD_FLAGS) -ldl -lz -lpthread -o $(BIN_DIR)/libHalide.so
 
 include/Halide.h: $(HEADERS) src/HalideFooter.h $(BIN_DIR)/build_halide_h
 	mkdir -p include
@@ -222,11 +248,19 @@ msvc/initmod.cpp: $(INITIAL_MODULES)
 # -m64 isn't respected unless we also use a 64-bit target
 $(BUILD_DIR)/initmod.%_64.ll: src/runtime/%.cpp $(BUILD_DIR)/clang_ok
 	@-mkdir -p $(BUILD_DIR)
-	$(CLANG) -ffreestanding -fno-blocks -fno-exceptions -m64 -target "x86_64-unknown-unknown-unknown" -DCOMPILING_HALIDE_RUNTIME -DBITS_64 -emit-llvm -S src/runtime/$*.cpp -o $@ -MMD -MP -MF $(BUILD_DIR)/initmod.$*_64.d
+	$(CLANG) $(CXX_WARNING_FLAGS) -O3 -ffreestanding -fno-blocks -fno-exceptions -m64 -target "x86_64-unknown-unknown-unknown" -DCOMPILING_HALIDE_RUNTIME -DBITS_64 -emit-llvm -S src/runtime/$*.cpp -o $@ -MMD -MP -MF $(BUILD_DIR)/initmod.$*_64.d
 
 $(BUILD_DIR)/initmod.%_32.ll: src/runtime/%.cpp $(BUILD_DIR)/clang_ok
 	@-mkdir -p $(BUILD_DIR)
-	$(CLANG) -ffreestanding -fno-blocks -fno-exceptions -m32 -DCOMPILING_HALIDE_RUNTIME -DBITS_32 -emit-llvm -S src/runtime/$*.cpp -o $@ -MMD -MP -MF $(BUILD_DIR)/initmod.$*_32.d
+	$(CLANG) $(CXX_WARNING_FLAGS) -O3 -ffreestanding -fno-blocks -fno-exceptions -m32 -target "i386-unknown-unknown-unknown" -DCOMPILING_HALIDE_RUNTIME -DBITS_32 -emit-llvm -S src/runtime/$*.cpp -o $@ -MMD -MP -MF $(BUILD_DIR)/initmod.$*_32.d
+
+$(BUILD_DIR)/initmod.%_64_debug.ll: src/runtime/%.cpp $(BUILD_DIR)/clang_ok
+	@-mkdir -p $(BUILD_DIR)
+	$(CLANG) $(CXX_WARNING_FLAGS) -g -DDEBUG_RUNTIME -ffreestanding -fno-blocks -fno-exceptions -m64 -target "x86_64-unknown-unknown-unknown" -DCOMPILING_HALIDE_RUNTIME -DBITS_64 -emit-llvm -S src/runtime/$*.cpp -o $@ -MMD -MP -MF $(BUILD_DIR)/initmod.$*_64_debug.d
+
+$(BUILD_DIR)/initmod.%_32_debug.ll: src/runtime/%.cpp $(BUILD_DIR)/clang_ok
+	@-mkdir -p $(BUILD_DIR)
+	$(CLANG) $(CXX_WARNING_FLAGS) -g -DDEBUG_RUNTIME -ffreestanding -fno-blocks -fno-exceptions -m32 -target "i386-unknown-unknown-unknown" -DCOMPILING_HALIDE_RUNTIME -DBITS_32 -emit-llvm -S src/runtime/$*.cpp -o $@ -MMD -MP -MF $(BUILD_DIR)/initmod.$*_32_debug.d
 
 $(BUILD_DIR)/initmod.%_ll.ll: src/runtime/%.ll
 	@-mkdir -p $(BUILD_DIR)
@@ -270,7 +304,7 @@ PERFORMANCE_TESTS = $(shell ls test/performance/*.cpp)
 ERROR_TESTS = $(shell ls test/error/*.cpp)
 WARNING_TESTS = $(shell ls test/warning/*.cpp)
 OPENGL_TESTS := $(shell ls test/opengl/*.cpp)
-TUTORIALS = $(filter-out *_generate.cpp, $(shell ls tutorial/*.cpp))
+TUTORIALS = $(filter-out %_generate.cpp, $(shell ls tutorial/*.cpp))
 
 STATIC_TEST_CXX ?= $(CXX)
 
@@ -287,7 +321,7 @@ test_tutorials: $(TUTORIALS:tutorial/%.cpp=tutorial_%)
 test_valgrind: $(CORRECTNESS_TESTS:test/correctness/%.cpp=valgrind_%)
 test_opengl: $(OPENGL_TESTS:test/opengl/%.cpp=opengl_%)
 
-run_tests: test_correctness test_errors test_tutorials test_static test_warnings
+run_tests: test_internal test_correctness test_errors test_tutorials test_static test_warnings
 	make test_performance
 
 build_tests: $(CORRECTNESS_TESTS:test/correctness/%.cpp=$(BIN_DIR)/test_%) \
@@ -323,7 +357,7 @@ tmp/static/%/%.o: $(BIN_DIR)/static_%_generate
 	@-echo
 
 $(BIN_DIR)/static_%_test: test/static/%_test.cpp $(BIN_DIR)/static_%_generate tmp/static/%/%.o include/HalideRuntime.h
-	$(STATIC_TEST_CXX) $(TEST_CXX_FLAGS) $(OPTIMIZE) -I tmp/static/$* -I apps/support -I src/runtime tmp/static/$*/*.o $< -lpthread $(STATIC_TEST_LIBS) -o $@
+	$(STATIC_TEST_CXX) $(STATIC_TEST_CXX_FLAGS) $(OPTIMIZE) -I tmp/static/$* -I apps/support -I src/runtime tmp/static/$*/*.o $< -lpthread $(STATIC_TEST_LIBS) -o $@
 
 $(BIN_DIR)/tutorial_%: tutorial/%.cpp $(BIN_DIR)/libHalide.so include/Halide.h
 	@ if [[ $@ == *_run ]]; then \

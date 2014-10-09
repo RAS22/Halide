@@ -39,8 +39,8 @@ bool relatively_equal(value_t a, value_t b) {
 #define fun_1(type, name, c_name)                                             \
     void test_##type##_##name(buffer_t *in_buf) {                             \
         Target target = get_jit_target_from_environment();                    \
-        if ((target.features & Target::OpenCL) != 0 &&                        \
-            (target.features & Target::CLDoubles) == 0 &&                     \
+        if (target.has_feature(Target::OpenCL) &&                             \
+            !target.has_feature(Target::CLDoubles) &&                         \
             type_of<type>() == type_of<double>()) {                           \
             return;                                                           \
         }                                                                     \
@@ -65,8 +65,8 @@ bool relatively_equal(value_t a, value_t b) {
 #define fun_2(type, name, c_name)                                                   \
     void test_##type##_##name(buffer_t *in_buf) {                                   \
         Target target = get_jit_target_from_environment();                          \
-        if ((target.features & Target::OpenCL) != 0 &&                              \
-            (target.features & Target::CLDoubles) == 0 &&                           \
+        if (target.has_feature(Target::OpenCL) &&                                   \
+            !target.has_feature(Target::CLDoubles) &&                               \
             type_of<type>() == type_of<double>()) {                                 \
             return;                                                                 \
         }                                                                           \
@@ -103,6 +103,7 @@ fun_1_all_types(exp)
 fun_1_all_types(log)
 fun_1_all_types(floor)
 fun_1_all_types(ceil)
+fun_1_all_types(trunc)
 fun_1_all_types(asin)
 fun_1_all_types(acos)
 fun_1_all_types(tan)
@@ -200,6 +201,7 @@ int main(int argc, char **argv) {
     call_1(log, 256, 1, 1000000)
     call_1(floor, 256, -25, 25)
     call_1(ceil, 256, -25, 25)
+    call_1(trunc, 256, -25, 25)
     call_2(pow, 256, .1, 20, .1, 2)
 
     printf("Success!\n");

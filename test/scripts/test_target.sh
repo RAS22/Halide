@@ -47,13 +47,15 @@ chmod a+r distrib/*
 
 if [ "$HL_TARGET" == ptx -a "$HOST" == Darwin ]; then
     echo "Halide builds but tests not run"
+elif [ "$HL_TARGET" == opencl -a "$HOST" == Darwin ]; then
+    echo "Halide builds but tests not run"
 elif [[ "$HL_TARGET" == *nacl ]]; then
     # The tests don't work for nacl yet. It's still worth testing that everything builds.
 
     # Also check that the nacl apps compile.
     make -C apps/HelloNaCl clean &&
-    make -C apps/nacl_demos &&
-    make -C apps/HelloNaCl clean &&
+    make -C apps/nacl_demos clean &&
+    make -C apps/HelloNaCl &&
     make -C apps/nacl_demos &&
     echo "Halide builds but tests not run."
 else
@@ -61,7 +63,6 @@ else
     make test_errors -j8 &&
     make test_static -j8 &&
     make test_tutorials -j8 &&
-    make test_opengl &&
     make test_performance &&
     make test_apps &&
     echo "All tests pass"

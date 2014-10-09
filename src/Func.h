@@ -49,9 +49,17 @@ class Stage {
     Internal::Schedule schedule;
     void set_dim_type(VarOrRVar var, Internal::For::ForType t);
     void split(const std::string &old, const std::string &outer, const std::string &inner, Expr factor, bool exact);
-    std::string dump_argument_list();
+    std::string stage_name;
 public:
-    Stage(Internal::Schedule s) : schedule(s) {s.touched();}
+    Stage(Internal::Schedule s, const std::string &n) :
+        schedule(s), stage_name(n) {s.touched();}
+
+    /** Return a string describing the current var list taking into
+     * account all the splits, reorders, and tiles. */
+    EXPORT std::string dump_argument_list() const;
+
+    /** Return the name of this stage, e.g. "f.update(2)" */
+    EXPORT const std::string &name() const;
 
     /** Scheduling calls that control how the domain of this stage is
      * traversed. See the documentation for Func for the meanings. */
@@ -192,17 +200,17 @@ public:
      * multiple outputs. */
     EXPORT Stage operator=(const Tuple &);
 
-    /** Define this function as a sum reduction over the negative of
-     * the given expression. The expression should refer to some RDom
-     * to sum over. If the function does not already have a pure
-     * definition, this sets it to zero.
-     */
-    EXPORT Stage operator+=(Expr);
-
     /** Define this function as a sum reduction over the given
      * expression. The expression should refer to some RDom to sum
      * over. If the function does not already have a pure definition,
      * this sets it to zero.
+     */
+    EXPORT Stage operator+=(Expr);
+
+    /** Define this function as a sum reduction over the negative of
+     * the given expression. The expression should refer to some RDom
+     * to sum over. If the function does not already have a pure
+     * definition, this sets it to zero.
      */
     EXPORT Stage operator-=(Expr);
 
@@ -1335,7 +1343,10 @@ public:
     }
     // @}
 
-    /** Scheduling for GLSL. */
+    /** Schedule for execution using GLSL. Conceptually, this is similar to
+     * parallelization over 'x' and 'y' (since GLSL shaders compute individual
+     * output pixels in parallel) and vectorization over 'c' (since GLSL
+     * implicitly vectorizes the color channel). */
     EXPORT Func &glsl(Var x, Var y, Var c);
 
     /** Specify how the storage for the function is laid out. These

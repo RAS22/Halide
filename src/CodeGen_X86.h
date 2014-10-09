@@ -8,6 +8,10 @@
 #include "CodeGen_Posix.h"
 #include "Target.h"
 
+namespace llvm {
+class JITEventListener;
+}
+
 namespace Halide {
 namespace Internal {
 
@@ -30,6 +34,9 @@ public:
 
     static void test();
 
+    void jit_init(llvm::ExecutionEngine *, llvm::Module *);
+    void jit_finalize(llvm::ExecutionEngine *, llvm::Module *, std::vector<JITCompiledModule::CleanupRoutine> *);
+
 protected:
 
     llvm::Triple get_target_triple() const;
@@ -44,6 +51,8 @@ protected:
 
     /** Nodes for which we want to emit specific sse/avx intrinsics */
     // @{
+    void visit(const Add *);
+    void visit(const Sub *);
     void visit(const Cast *);
     void visit(const Div *);
     void visit(const Min *);
@@ -53,6 +62,9 @@ protected:
     std::string mcpu() const;
     std::string mattrs() const;
     bool use_soft_float_abi() const;
+
+private:
+    llvm::JITEventListener* jitEventListener;
 };
 
 }}

@@ -39,9 +39,9 @@ struct VarOrRVar {
         else return var.name();
     }
 
-    const Var var;
-    const RVar rvar;
-    const bool is_rvar;
+    Var var;
+    RVar rvar;
+    bool is_rvar;
 };
 
 /** A single definition of a Func. May be a pure or update definition. */

@@ -73,7 +73,6 @@ private:
     void visit(const Ramp *);
     void visit(const Broadcast *);
     void visit(const Call *);
-    void visit(const UnionCall *);
     void visit(const Let *);
     void visit(const LetStmt *);
     void visit(const AssertStmt *);
@@ -314,13 +313,6 @@ void IRComparer::visit(const Call *op) {
     compare_names(e->name, op->name);
     compare_scalar(e->call_type, op->call_type);
     compare_scalar(e->value_index, op->value_index);
-    compare_expr_vector(e->args, op->args);
-}
-
-void IRComparer::visit(const UnionCall *op) {
-    const UnionCall *e = expr.as<UnionCall>();
-
-    compare_names(e->name, op->name);
     compare_expr_vector(e->args, op->args);
 }
 

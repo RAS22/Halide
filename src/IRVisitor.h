@@ -45,7 +45,6 @@ struct Load;
 struct Ramp;
 struct Broadcast;
 struct Call;
-struct UnionCall;
 struct Let;
 struct LetStmt;
 struct AssertStmt;
@@ -95,7 +94,6 @@ public:
     EXPORT virtual void visit(const Ramp *);
     EXPORT virtual void visit(const Broadcast *);
     EXPORT virtual void visit(const Call *);
-    EXPORT virtual void visit(const UnionCall *);
     EXPORT virtual void visit(const Let *);
     EXPORT virtual void visit(const LetStmt *);
     EXPORT virtual void visit(const AssertStmt *);
@@ -159,7 +157,6 @@ public:
     EXPORT virtual void visit(const Ramp *);
     EXPORT virtual void visit(const Broadcast *);
     EXPORT virtual void visit(const Call *);
-    EXPORT virtual void visit(const UnionCall *);
     EXPORT virtual void visit(const Let *);
     EXPORT virtual void visit(const LetStmt *);
     EXPORT virtual void visit(const AssertStmt *);

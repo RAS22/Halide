@@ -67,7 +67,6 @@ protected:
     EXPORT virtual void visit(const Ramp *);
     EXPORT virtual void visit(const Broadcast *);
     EXPORT virtual void visit(const Call *);
-    EXPORT virtual void visit(const UnionCall *);
     EXPORT virtual void visit(const Let *);
     EXPORT virtual void visit(const LetStmt *);
     EXPORT virtual void visit(const AssertStmt *);

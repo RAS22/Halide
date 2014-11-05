@@ -82,10 +82,6 @@ class FiniteDifference : public IRMutator {
         expr = brute_force(op);
     }
 
-    void visit(const UnionCall *op) {
-        expr = brute_force(op);
-    }
-
     void visit(const Let *op) {
         scope.push(op->name, mutate(op->value));
         expr = mutate(op->body);
@@ -305,17 +301,6 @@ class Monotonic : public IRVisitor {
     }
 
     void visit(const Call *op) {
-        for (size_t i = 0; i < op->args.size(); i++) {
-            op->args[i].accept(this);
-            if (result != Constant) {
-                result = Unknown;
-                return;
-            }
-        }
-        result = Constant;
-    }
-
-    void visit(const UnionCall *op) {
         for (size_t i = 0; i < op->args.size(); i++) {
             op->args[i].accept(this);
             if (result != Constant) {

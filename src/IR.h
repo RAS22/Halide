@@ -589,33 +589,8 @@ struct Evaluate : public StmtNode<Evaluate> {
 // And the definition of a reduction domain
 #include "Reduction.h"
 
-// And the definition of a union operation
-#include "UnionReduction.h"
-
 namespace Halide {
 namespace Internal {
-
-/** A union reduction call. */
-struct UnionCall : public ExprNode<UnionCall> {
-    int value_index;
-    std::string name;
-    std::vector<Expr> args;
-    UnionReduction union_op;
-
-    // Convenience function
-    static Expr make(const UnionReduction& u, const std::vector<Expr> &args, int idx) {
-       for (size_t i = 0; i < args.size(); i++) {
-            assert(args[i].defined() && "Call of undefined");
-        }
-       UnionCall* node = new UnionCall;
-       node->type = u.type(idx);
-       node->name = u.name();
-       node->args = args;
-       node->value_index = idx;
-       node->union_op    = u;
-       return node;
-    }
-};
 
 /** A function call. This can represent a call to some extern
  * function (like sin), but it's also our multi-dimensional

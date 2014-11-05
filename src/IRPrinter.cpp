@@ -368,17 +368,6 @@ void IRPrinter::visit(const Call *op) {
     }
 }
 
-void IRPrinter::visit(const UnionCall *op) {
-    stream << op->name << "(";
-    for (size_t i = 0; i < op->args.size(); i++) {
-        print(op->args[i]);
-        if (i < op->args.size() - 1) {
-            stream << ", ";
-        }
-    }
-    stream << ")";
-}
-
 void IRPrinter::visit(const Let *op) {
     stream << "(let " << op->name << " = ";
     print(op->value);

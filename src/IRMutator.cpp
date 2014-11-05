@@ -135,25 +135,6 @@ void IRMutator::visit(const Call *op) {
     }
 }
 
-void IRMutator::visit(const UnionCall *op) {
-    vector<Expr > new_args(op->args.size());
-    bool changed = false;
-
-    // Mutate the args
-    for (size_t i = 0; i < op->args.size(); i++) {
-        Expr old_arg = op->args[i];
-        Expr new_arg = mutate(old_arg);
-        if (!new_arg.same_as(old_arg)) changed = true;
-        new_args[i] = new_arg;
-    }
-
-    if (!changed) {
-        expr = op;
-    } else {
-        expr = UnionCall::make(op->union_op, new_args, op->value_index);
-    }
-}
-
 void IRMutator::visit(const Let *op) {
     Expr value = mutate(op->value);
     Expr body = mutate(op->body);

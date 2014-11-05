@@ -138,12 +138,6 @@ void IRVisitor::visit(const Call *op) {
     }
 }
 
-void IRVisitor::visit(const UnionCall *op) {
-    for (size_t i = 0; i < op->args.size(); i++) {
-        op->args[i].accept(this);
-    }
-}
-
 void IRVisitor::visit(const Let *op) {
     op->value.accept(this);
     op->body.accept(this);
@@ -358,12 +352,6 @@ void IRGraphVisitor::visit(const Broadcast *op) {
 }
 
 void IRGraphVisitor::visit(const Call *op) {
-    for (size_t i = 0; i < op->args.size(); i++) {
-        include(op->args[i]);
-    }
-}
-
-void IRGraphVisitor::visit(const UnionCall *op) {
     for (size_t i = 0; i < op->args.size(); i++) {
         include(op->args[i]);
     }

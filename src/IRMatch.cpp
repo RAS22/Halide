@@ -212,21 +212,6 @@ public:
         }
     }
 
-    void visit(const UnionCall *op) {
-        const UnionCall *e = expr.as<UnionCall>();
-        if (result && e &&
-            e->type == op->type &&
-            e->name == op->name &&
-            e->args.size() == op->args.size()) {
-            for (size_t i = 0; result && (i < e->args.size()); i++) {
-                expr = e->args[i];
-                op->args[i].accept(this);
-            }
-        } else {
-            result = false;
-        }
-    }
-
     void visit(const Let *op) {
         const Let *e = expr.as<Let>();
         if (result && e && e->name == op->name) {

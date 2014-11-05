@@ -45,7 +45,6 @@ public:
     void visit(const Ramp *);
     void visit(const Broadcast *);
     void visit(const Call *);
-    void visit(const UnionCall *);
     void visit(const Let *);
     void visit(const LetStmt *);
     void visit(const AssertStmt *);
@@ -343,11 +342,6 @@ void ComputeModulusRemainder::visit(const Broadcast *) {
 }
 
 void ComputeModulusRemainder::visit(const Call *) {
-    modulus = 1;
-    remainder = 0;
-}
-
-void ComputeModulusRemainder::visit(const UnionCall *) {
     modulus = 1;
     remainder = 0;
 }

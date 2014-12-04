@@ -40,7 +40,8 @@ using namespace Internal;
 namespace {
 
 Internal::Parameter make_user_context() {
-    return Internal::Parameter(type_of<void*>(), false, 0, "__user_context", /*is_explicit_name*/ true);
+    return Internal::Parameter(type_of<void*>(), false, 0, "__user_context",
+        /*is_explicit_name*/ true, /*register_instance*/ false);
 }
 
 vector<Argument> add_user_context_arg(vector<Argument> args, const Target& target) {
@@ -106,6 +107,10 @@ Func::Func(Function f) : func(f),
                          cache_size(0),
                          random_seed(0),
                          jit_user_context(make_user_context()) {
+}
+
+Func::~Func() {
+    clear_custom_lowering_passes();
 }
 
 const string &Func::name() const {
@@ -1999,8 +2004,13 @@ std::vector<Argument> Func::infer_arguments() const {
 
 void Func::lower(const Target &t) {
     if (!lowered.defined() || t != lowered_target) {
-        lowered = Halide::Internal::lower(func, t);
+        vector<IRMutator *> custom_passes;
+        for (size_t i = 0; i < custom_lowering_passes.size(); i++) {
+            custom_passes.push_back(custom_lowering_passes[i].pass);
+        }
+        lowered = Halide::Internal::lower(func, t, custom_passes);
         lowered_target = t;
+
         // Forbid new definitions of the func
         func.freeze();
     }
@@ -2313,6 +2323,22 @@ void Func::memoization_cache_set_size(uint64_t size) {
     if (compiled_module.memoization_cache_set_size) {
         compiled_module.memoization_cache_set_size(size);
     }
+}
+
+void Func::add_custom_lowering_pass(IRMutator *pass, void (*deleter)(IRMutator *)) {
+    invalidate_cache();
+    CustomLoweringPass p = {pass, deleter};
+    custom_lowering_passes.push_back(p);
+}
+
+void Func::clear_custom_lowering_passes() {
+    invalidate_cache();
+    for (size_t i = 0; i < custom_lowering_passes.size(); i++) {
+        if (custom_lowering_passes[i].deleter) {
+            custom_lowering_passes[i].deleter(custom_lowering_passes[i].pass);
+        }
+    }
+    custom_lowering_passes.clear();
 }
 
 void Func::realize(Buffer b, const Target &target) {

@@ -9,6 +9,7 @@
 // This is declared in NVPTX.h, which is not exported. Ugly, but seems better than
 // hardcoding a path to the .h file.
 #ifdef WITH_PTX
+#include "nvvm.h" // TODO: separate WITH_NVVM sub-def?
 namespace llvm { ModulePass *createNVVMReflectPass(const StringMap<int>& Mapping); }
 #endif
 
@@ -246,6 +247,10 @@ bool CodeGen_PTX_Dev::use_soft_float_abi() const {
     return false;
 }
 
+static void checkNVVMCall(nvvmResult res) {
+  assert(res == NVVM_SUCCESS && "libnvvm call failed");
+}
+
 vector<char> CodeGen_PTX_Dev::compile_to_src() {
 
     #ifdef WITH_PTX
@@ -258,149 +263,69 @@ vector<char> CodeGen_PTX_Dev::compile_to_src() {
     /*cl::ParseCommandLineOptions(argc, argv, "Halide PTX internal compiler\n");*/
 
     // Generic llvm optimizations on the module.
-    optimize_module();
+    // optimize_module();
 
     // Set up TargetTriple
-    module->setTargetTriple(Triple::normalize(march()+"--"));
-    Triple TheTriple(module->getTargetTriple());
-
-    // Allocate target machine
-    const std::string MArch = march();
-    const std::string MCPU = mcpu();
-    const llvm::Target* TheTarget = 0;
-
-    std::string errStr;
-    TheTarget = TargetRegistry::lookupTarget(TheTriple.getTriple(), errStr);
-    internal_assert(TheTarget);
-
-    TargetOptions Options;
-    Options.LessPreciseFPMADOption = true;
-    Options.PrintMachineCode = false;
-    Options.NoFramePointerElim = false;
-    //Options.NoExcessFPPrecision = false;
-    Options.AllowFPOpFusion = FPOpFusion::Fast;
-    Options.UnsafeFPMath = true;
-    Options.NoInfsFPMath = false;
-    Options.NoNaNsFPMath = false;
-    Options.HonorSignDependentRoundingFPMathOption = false;
-    Options.UseSoftFloat = false;
-    /* if (FloatABIForCalls != FloatABI::Default) */
-        /* Options.FloatABIType = FloatABIForCalls; */
-    Options.NoZerosInBSS = false;
-    #if LLVM_VERSION < 33
-    Options.JITExceptionHandling = false;
-    #endif
-    Options.JITEmitDebugInfo = false;
-    Options.JITEmitDebugInfoToDisk = false;
-    Options.GuaranteedTailCallOpt = false;
-    Options.StackAlignmentOverride = 0;
-    // Options.DisableJumpTables = false;
-    Options.TrapFuncName = "";
-
-    CodeGenOpt::Level OLvl = CodeGenOpt::Aggressive;
-
-    const std::string FeaturesStr = mattrs();
-    std::auto_ptr<TargetMachine>
-        target(TheTarget->createTargetMachine(TheTriple.getTriple(),
-                                              MCPU, FeaturesStr, Options,
-                                              llvm::Reloc::Default,
-                                              llvm::CodeModel::Default,
-                                              OLvl));
-    internal_assert(target.get()) << "Could not allocate target machine!";
-    TargetMachine &Target = *target.get();
-
-    // Set up passes
-    PassManager PM;
-
-    TargetLibraryInfo *TLI = new TargetLibraryInfo(TheTriple);
-    PM.add(TLI);
-
-    if (target.get()) {
-        #if LLVM_VERSION < 33
-        PM.add(new TargetTransformInfo(target->getScalarTargetTransformInfo(),
-                                       target->getVectorTargetTransformInfo()));
-        #else
-        target->addAnalysisPasses(PM);
-        #endif
+    module->setTargetTriple(Triple::normalize(march()+"-nvidia-cuda"));
+    
+    // nvptx64 datalayout
+    module->setDataLayout("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
+                          "i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-"
+                          "v64:64:64-v128:128:128-n16:32:64");
+    
+    nvvmProgram compileUnit;
+    nvvmResult res;
+    
+    // Export IR to string
+    std::string moduleStr;
+    llvm::raw_string_ostream str(moduleStr);
+    // str << *module;
+    llvm::WriteBitcodeToFile(module, str);
+    str.flush();
+    
+    std::string err;
+    llvm::raw_fd_ostream moduleOut("/tmp/halide.ll", err);
+    moduleOut << *module;
+    moduleOut.close();
+    
+    // debug(0) << "Compiling PTX:\n" << moduleStr << "\n";
+    
+    // NVVM Initialization
+    checkNVVMCall(nvvmCreateProgram(&compileUnit));
+    // Create NVVM compilation unit from LLVM IR
+    checkNVVMCall(nvvmAddModuleToProgram(compileUnit,
+                                         moduleStr.c_str(), moduleStr.size(),
+                                         module->getModuleIdentifier().c_str()));
+    
+    std::string archVer = mcpu();
+    std::string archArg = "-arch=compute_" + std::string(archVer.c_str()+3);
+    debug(0) << "Arch: " << archArg << "\n";
+    
+    const char *options[] = { archArg.c_str() };
+    
+    // Compile LLVM IR into PTX
+    res = nvvmCompileProgram(compileUnit, 1, options);
+    if (res != NVVM_SUCCESS) {
+      std::cerr << "nvvmCompileProgram failed!" << std::endl;
+      size_t logSize;
+      nvvmGetProgramLogSize(compileUnit, &logSize);
+      char *msg = new char[logSize];
+      nvvmGetProgramLog(compileUnit, msg);
+      std::cerr << msg << std::endl;
+      delete [] msg;
+      internal_error << "nvvmCompileProgram failed";
     }
 
-    // Add the target data from the target machine, if it exists, or the module.
-    #if LLVM_VERSION < 35
-    if (const DataLayout *TD = Target.getDataLayout()) {
-        PM.add(new DataLayout(*TD));
-    } else {
-        PM.add(new DataLayout(module));
-    }
-    #else
-    #if LLVM_VERSION == 35
-    const DataLayout *TD = Target.getDataLayout();
-    if (TD) {
-        module->setDataLayout(TD);
-    }
-    PM.add(new DataLayoutPass(module));
-    #else // llvm >= 3.6
-    const DataLayout *TD = Target.getSubtargetImpl()->getDataLayout();
-    if (TD) {
-        module->setDataLayout(TD);
-    }
-    PM.add(new DataLayoutPass);
-    #endif
-    #endif
+    size_t ptxSize;
+    checkNVVMCall(nvvmGetCompiledResultSize(compileUnit, &ptxSize));
+    vector<char> buffer;
+    buffer.resize(ptxSize);
+    checkNVVMCall(nvvmGetCompiledResult(compileUnit, &buffer[0]));
+    checkNVVMCall(nvvmDestroyProgram(&compileUnit));
 
-    // NVidia's libdevice library uses a __nvvm_reflect to choose
-    // how to handle denormalized numbers. (The pass replaces calls
-    // to __nvvm_reflect with a constant via a map lookup. The inliner
-    // pass then resolves these situations to fast code, often a single
-    // instruction per decision point.)
-    //
-    // The default is (more) IEEE like handling. FTZ mode flushes them
-    // to zero. (This may only apply to single-precision.)
-    //
-    // The libdevice documentation covers other options for math accuracy
-    // such as replacing division with multiply by the reciprocal and
-    // use of fused-multiply-add, but they do not seem to be controlled
-    // by this __nvvvm_reflect mechanism and may be flags to earlier compiler
-    // passes.
-    #define kDefaultDenorms 0
-    #define kFTZDenorms     1
-
-    StringMap<int> reflect_mapping;
-    reflect_mapping[StringRef("__CUDA_FTZ")] = kFTZDenorms;
-    PM.add(createNVVMReflectPass(reflect_mapping));
-
-    // Inlining functions is essential to PTX
-    PM.add(createAlwaysInlinerPass());
-
-    // Override default to generate verbose assembly.
-    Target.setAsmVerbosityDefault(true);
-
-    // Output string stream
-    std::string outstr;
-    raw_string_ostream outs(outstr);
-    formatted_raw_ostream ostream(outs);
-
-    // Ask the target to add backend passes as necessary.
-    bool fail = Target.addPassesToEmitFile(PM, ostream,
-                                           TargetMachine::CGFT_AssemblyFile,
-                                           true);
-    if (fail) {
-        internal_error << "Failed to set up passes to emit PTX source\n";
-    }
-
-    PM.run(*module);
-
-    ostream.flush();
-
-    if (debug::debug_level >= 2) {
-        module->dump();
-    }
-    debug(2) << "Done with CodeGen_PTX_Dev::compile_to_src";
-
-
-    string str = outs.str();
-    debug(1) << "PTX kernel:\n" << str.c_str() << "\n";
-    vector<char> buffer(str.begin(), str.end());
-    buffer.push_back(0);
+    debug(1) << "PTX kernel:\n" << &buffer[0] << "\n";
+    // vector<char> buffer(str.begin(), str.end());
+    // buffer.push_back(0);
     return buffer;
 #else // WITH_PTX
     return vector<char>();

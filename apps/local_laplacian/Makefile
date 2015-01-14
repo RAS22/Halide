@@ -4,8 +4,8 @@ all: process
 
 local_laplacian: ../../ local_laplacian.cpp
 	$(MAKE) -C ../../ $(LIB_HALIDE)
-	$(CXX) local_laplacian.cpp -g -I ../../include ../../$(LIB_HALIDE) -o local_laplacian -lpthread -ldl -lz $(LDFLAGS) \
-	$(LLVM_SHARED_LIBS)
+	$(CXX) local_laplacian.cpp -g -I ../../include ../../$(LIB_HALIDE) -lcurses -o local_laplacian -lpthread -ldl -lz $(LDFLAGS) \
+	$(LLVM_SHARED_LIBS) -L/usr/local/cuda/nvvm/lib64 -lnvvm
 
 local_laplacian.o: local_laplacian
 	./local_laplacian

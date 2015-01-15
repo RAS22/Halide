@@ -267,42 +267,42 @@ vector<char> CodeGen_PTX_Dev::compile_to_src() {
 
     // Set up TargetTriple
     module->setTargetTriple(Triple::normalize(march()+"-nvidia-cuda"));
-    
+
     // nvptx64 datalayout
     module->setDataLayout("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
                           "i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-"
                           "v64:64:64-v128:128:128-n16:32:64");
-    
+
     nvvmProgram compileUnit;
     nvvmResult res;
-    
+
     // Export IR to string
     std::string moduleStr;
     llvm::raw_string_ostream str(moduleStr);
     // str << *module;
     llvm::WriteBitcodeToFile(module, str);
     str.flush();
-    
+
     std::string err;
     llvm::raw_fd_ostream moduleOut("/tmp/halide.ll", err);
     moduleOut << *module;
     moduleOut.close();
-    
+
     // debug(0) << "Compiling PTX:\n" << moduleStr << "\n";
-    
+
     // NVVM Initialization
     checkNVVMCall(nvvmCreateProgram(&compileUnit));
     // Create NVVM compilation unit from LLVM IR
     checkNVVMCall(nvvmAddModuleToProgram(compileUnit,
                                          moduleStr.c_str(), moduleStr.size(),
                                          module->getModuleIdentifier().c_str()));
-    
+
     std::string archVer = mcpu();
     std::string archArg = "-arch=compute_" + std::string(archVer.c_str()+3);
-    debug(0) << "Arch: " << archArg << "\n";
-    
+    //debug(0) << "Arch: " << archArg << "\n";
+
     const char *options[] = { archArg.c_str() };
-    
+
     // Compile LLVM IR into PTX
     res = nvvmCompileProgram(compileUnit, 1, options);
     if (res != NVVM_SUCCESS) {
@@ -344,7 +344,7 @@ string CodeGen_PTX_Dev::get_current_kernel_name() {
 void CodeGen_PTX_Dev::dump() {
     module->dump();
 }
-    
+
 std::string CodeGen_PTX_Dev::print_gpu_name(const std::string &name) {
     return name;
 }

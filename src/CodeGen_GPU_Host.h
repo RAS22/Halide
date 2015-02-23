@@ -10,6 +10,9 @@
 #include "CodeGen_MIPS.h"
 #include "CodeGen_PNaCl.h"
 
+#include "IR.h"
+#include <map>
+
 namespace Halide {
 namespace Internal {
 
@@ -78,25 +81,19 @@ protected:
     void visit(const For *);
     // @}
 
-    /** Finds and links in the CUDA runtime symbols prior to jitting */
+    /** Finds and links in the necessary runtime symbols prior to jitting */
     void jit_init(llvm::ExecutionEngine *ee, llvm::Module *mod);
-
-    /** Reaches inside the module at sets it to use a single shared
-     * cuda context */
-    void jit_finalize(llvm::ExecutionEngine *ee, llvm::Module *mod,
-                      std::vector<JITCompiledModule::CleanupRoutine> *cleanup_routines);
 
     static bool lib_cuda_linked;
 
-    static CodeGen_GPU_Dev* make_dev(Target);
+    static std::map<DeviceAPI, CodeGen_GPU_Dev *> make_devices(Target);
 
-    llvm::Value *get_module_state();
+    llvm::Value *get_module_state(const std::string &api_unique_name);
 
 private:
     /** Child code generator for device kernels. */
-    CodeGen_GPU_Dev *cgdev;
+    std::map<DeviceAPI, CodeGen_GPU_Dev *> cgdev;
 };
-
 
 }}
 

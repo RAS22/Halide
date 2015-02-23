@@ -277,6 +277,12 @@ void CodeGen_C::compile_header(const string &name, const vector<Argument> &args)
     }
     stream << ") HALIDE_FUNCTION_ATTRS;\n";
 
+    // And also the function prototype for the _argv call
+    stream << "#ifdef __cplusplus\n";
+    stream << "extern \"C\"\n";
+    stream << "#endif\n";
+    stream << "int " << name << "_argv(void **args) HALIDE_FUNCTION_ATTRS;\n";
+
     stream << "#endif\n";
 }
 
@@ -346,6 +352,7 @@ void CodeGen_C::compile(Stmt s, string name,
         Buffer buffer = images_to_embed[i];
         string name = print_name(buffer.name());
         buffer_t b = *(buffer.raw_buffer());
+        user_assert(b.host) << "Can't embed image: " << buffer.name() << " because it has a null host pointer\n";
 
         // Figure out the offset of the last pixel.
         size_t num_elems = 1;
@@ -362,7 +369,6 @@ void CodeGen_C::compile(Stmt s, string name,
         stream << "};\n";
 
         // Emit the buffer_t
-        user_assert(b.host) << "Can't embed image: " << buffer.name() << " because it has a null host pointer\n";
         user_assert(!b.dev_dirty) << "Can't embed image: " << buffer.name() << "because it has a dirty device pointer\n";
         stream << "static buffer_t " << name << "_buffer = {"
                << "0, " // dev
@@ -755,12 +761,19 @@ void CodeGen_C::visit(const Call *op) {
             }
             rhs << ")";
         } else if (op->name == Call::profiling_timer) {
-            internal_assert(op->args.size() == 0);
+            internal_assert(op->args.size() == 1);
             rhs << "halide_profiling_timer(";
             rhs << (have_user_context ? "__user_context_" : "NULL");
             rhs << ")";
         } else if (op->name == Call::lerp) {
+            internal_assert(op->args.size() == 3);
             Expr e = lower_lerp(op->args[0], op->args[1], op->args[2]);
+            rhs << print_expr(e);
+        } else if (op->name == Call::absd) {
+            internal_assert(op->args.size() == 2);
+            Expr a = op->args[0];
+            Expr b = op->args[1];
+            Expr e = select(a < b, b - a, a - b);
             rhs << print_expr(e);
         } else if (op->name == Call::null_handle) {
             rhs << "NULL";

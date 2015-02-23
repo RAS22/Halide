@@ -39,9 +39,13 @@ public:
     std::vector<char> compile_to_src();
     std::string get_current_kernel_name();
 
+    llvm::Triple get_target_triple() const;
+
     void dump();
     
     virtual std::string print_gpu_name(const std::string &name);
+
+    std::string api_unique_name() { return "cuda"; }
 
 protected:
     using CodeGen::visit;

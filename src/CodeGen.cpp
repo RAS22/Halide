@@ -7,7 +7,7 @@
 #include "Debug.h"
 #include "Deinterleave.h"
 #include "Simplify.h"
-#include "JITCompiledModule.h"
+#include "JITModule.h"
 #include "CodeGen_Internal.h"
 #include "Lerp.h"
 #include "Util.h"
@@ -98,17 +98,7 @@ CodeGen::CodeGen(Target t) :
     initialize_llvm();
 }
 
-void CodeGen::jit_finalize(llvm::ExecutionEngine *ee, llvm::Module *module,
-                           std::vector<JITCompiledModule::CleanupRoutine> *cleanup_routines) {
-    // If the module contains a memoization cache cleanup function, run it when the module dies.
-    llvm::Function *fn = module->getFunction("halide_memoization_cache_cleanup");
-    if (fn) {
-        void *f = ee->getPointerToFunction(fn);
-        internal_assert(f) << "Could not find compiled form of halide_memoization_cache_release in module\n";
-        void (*cleanup_routine)(void *) =
-            reinterpret_bits<void (*)(void *)>(f);
-        cleanup_routines->push_back(JITCompiledModule::CleanupRoutine(cleanup_routine, NULL));
-    }
+void CodeGen::jit_finalize(llvm::ExecutionEngine *ee, llvm::Module *module) {
 }
 
 void CodeGen::initialize_llvm() {
@@ -310,10 +300,10 @@ void CodeGen::compile(Stmt stmt, string name,
     debug(2) << module << "\n";
 
     // Now verify the function is ok
-    verifyFunction(*function);
+    internal_assert(verifyFunction(*function) == false);
 
     // Now we need to make the wrapper function (useful for calling from jit)
-    string wrapper_name = name + "_jit_wrapper";
+    string wrapper_name = name + "_argv";
     func_t = FunctionType::get(i32, vec<llvm::Type *>(i8->getPointerTo()->getPointerTo()), false);
     llvm::Function *wrapper = llvm::Function::Create(func_t, llvm::Function::ExternalLinkage, wrapper_name, module);
     block = BasicBlock::Create(*context, "entry", wrapper);
@@ -338,10 +328,10 @@ void CodeGen::compile(Stmt stmt, string name,
     debug(4) << "Creating call from wrapper to actual function\n";
     Value *result = builder->CreateCall(function, wrapper_args);
     builder->CreateRet(result);
-    verifyFunction(*wrapper);
+    internal_assert(verifyFunction(*wrapper) == false);       
 
     // Finally, verify the module is ok
-    verifyModule(*module);
+    internal_assert(verifyModule(*module) == false);
     debug(2) << "Done generating llvm bitcode\n";
 
     // Optimize it
@@ -352,15 +342,16 @@ llvm::Type *CodeGen::llvm_type_of(Type t) {
     return Internal::llvm_type_of(context, t);
 }
 
-JITCompiledModule CodeGen::compile_to_function_pointers() {
+JITModule CodeGen::compile_to_function_pointers() {
     internal_assert(module) << "No module defined. Must call compile before calling compile_to_function_pointer.\n";
 
-    JITCompiledModule m;
+    JITModule m;
 
-    m.compile_module(this, module, function_name);
+    std::vector<JITModule> shared_runtime = JITSharedRuntime::get(this, target);
+    m.compile_module(this, module, function_name, shared_runtime, std::vector<std::string>());
 
     // We now relinquish ownership of the module, and give it to the
-    // JITCompiledModule object that we're returning.
+    // JITModule object that we're returning.
     owns_module = false;
 
     return m;
@@ -370,8 +361,14 @@ void CodeGen::optimize_module() {
 
     debug(3) << "Optimizing module\n";
 
+    #if LLVM_VERSION < 37
     FunctionPassManager function_pass_manager(module);
     PassManager module_pass_manager;
+    #else
+    legacy::FunctionPassManager function_pass_manager(module);
+    legacy::PassManager module_pass_manager;
+    #endif
+
 
     #if LLVM_VERSION >= 36
     internal_assert(module->getDataLayout()) << "Optimizing module with no data layout, probably will crash in LLVM.\n";
@@ -483,15 +480,23 @@ void CodeGen::compile_to_native(const string &filename, bool assembly) {
     formatted_raw_ostream out(raw_out);
 
     // Build up all of the passes that we want to do to the module.
+    #if LLVM_VERSION < 37
     PassManager pass_manager;
+    #else
+    legacy::PassManager pass_manager;
+    #endif
 
+    #if LLVM_VERSION < 37
     // Add an appropriate TargetLibraryInfo pass for the module's triple.
     pass_manager.add(new TargetLibraryInfo(Triple(module->getTargetTriple())));
+    #else
+    pass_manager.add(new TargetLibraryInfoWrapperPass(Triple(module->getTargetTriple())));
+    #endif
 
     #if LLVM_VERSION < 33
     pass_manager.add(new TargetTransformInfo(target_machine->getScalarTargetTransformInfo(),
                                              target_machine->getVectorTargetTransformInfo()));
-    #else
+    #elif LLVM_VERSION < 37
     target_machine->addAnalysisPasses(pass_manager);
     #endif
 
@@ -505,7 +510,11 @@ void CodeGen::compile_to_native(const string &filename, bool assembly) {
     pass_manager.add(createAlwaysInlinerPass());
 
     // Override default to generate verbose assembly.
+    #if LLVM_VERSION < 37
     target_machine->setAsmVerbosityDefault(true);
+    #else
+    target_machine->Options.MCOptions.AsmVerbose = true;
+    #endif
 
     // Ask the target to add backend passes as necessary.
     TargetMachine::CodeGenFileType file_type =
@@ -1367,26 +1376,31 @@ Expr unbroadcast(Expr e) {
 bool CodeGen::function_takes_user_context(const string &name) {
     static const char *user_context_runtime_funcs[] = {
         "halide_copy_to_host",
-        "halide_copy_to_dev",
+        "halide_copy_to_device",
         "halide_current_time_ns",
         "halide_debug_to_file",
-        "halide_dev_free",
-        "halide_dev_malloc",
-        "halide_dev_run",
-        "halide_dev_sync",
+        "halide_device_free",
+        "halide_device_malloc",
+        "halide_device_sync",
         "halide_do_par_for",
         "halide_do_task",
         "halide_error",
         "halide_free",
-        "halide_init_kernels",
         "halide_malloc",
         "halide_print",
         "halide_profiling_timer",
-        "halide_release",
+        "halide_device_release",
         "halide_start_clock",
         "halide_trace",
         "halide_memoization_cache_lookup",
-        "halide_memoization_cache_store"
+        "halide_memoization_cache_store",
+        "halide_cuda_run",
+        "halide_opencl_run",
+        "halide_opengl_run",
+        "halide_cuda_initialize_kernels",
+        "halide_opencl_initialize_kernels",
+        "halide_opengl_initialize_kernels"
+        "halide_get_gpu_device",
     };
     const int num_funcs = sizeof(user_context_runtime_funcs) /
         sizeof(user_context_runtime_funcs[0]);
@@ -1453,7 +1467,7 @@ Value *CodeGen::interleave_vectors(Type type, const std::vector<Expr>& vecs) {
         }
 
         return builder->CreateShuffleVector(value_ab, value_c, ConstantVector::get(indices));
-    } else if (vecs.size() == 4) {
+    } else if (vecs.size() == 4 && vecs[0].type().bits <= 32) {
         Expr a = vecs[0], b = vecs[1], c = vecs[2], d = vecs[3];
         debug(3) << "Vectors to interleave: " << a << ", " << b << ", " << c << ", " << d << "\n";
 
@@ -1934,7 +1948,7 @@ void CodeGen::visit(const Call *op) {
             }
 
         } else if (op->name == Call::profiling_timer) {
-            internal_assert(op->args.size() == 0);
+            internal_assert(op->args.size() == 1);
             llvm::Function *fn = Intrinsic::getDeclaration(module,
                 Intrinsic::readcyclecounter, std::vector<llvm::Type*>());
             CallInst *call = builder->CreateCall(fn);
